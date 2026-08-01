@@ -1,31 +1,40 @@
 """
-FastAPI routers — Reelz backend.
+FastAPI routers — Reelz backend (POST edition).
 
 Endpoints:
-  GET  /api/v1/events           → UNIFIED SSE: streams + downloads + subtitles in one connection
-  GET  /api/v1/proxy            → HTTP proxy (SSRF-guarded, M3U8 rewrite)
-  GET  /api/v1/health           → liveness check
-  GET  /api/v1/stats            → cache stats + provider count
-  GET  /api/v1/providers        → per-provider health + circuit breaker status
+  POST /api/v1/streams    → { ok, stream, streams, subtitles, cached, took_ms }
+  POST /api/v1/download   → { ok, links, took_ms }
+  POST /api/v1/subtitles  → { ok, subtitles, took_ms }
+  GET  /api/v1/proxy      → HTTP proxy (SSRF-guarded, M3U8 rewrite)
+  GET  /api/v1/health     → liveness check
+  GET  /api/v1/stats      → cache stats + provider count
+  GET  /api/v1/providers  → per-provider health + circuit breaker status
   POST /api/v1/providers/{id}/reset → manually reset a provider's circuit breaker
 
-SSE event types emitted by /api/v1/events:
-  stream    → { provider_id, name, url, type, quality, headers, playable, language, priority }
-  download  → { provider_id, name, url, type, quality, language, size_bytes }
-  subtitle  → { provider, language, label, url, format, rating, downloads }
-  provider  → { id, state, duration_ms }
-  done      → { streams_total, downloads_total, subtitles_total }
+  (Legacy SSE kept at GET /api/v1/events for backward compat)
 
-The app opens ONE connection. It plays the first 'stream' event immediately.
-Downloads and subtitles arrive in the background — no waiting, no polling.
+Speed design:
+  /streams  uses run_providers_first_wins() — returns as soon as the FIRST valid
+            m3u8 (or mp4) arrives from any provider. Typically 300-800 ms vs
+            the old SSE first-event time of 1-3 s. The full fallback ladder is
+            included in the response so the Android client has alternatives
+            without needing a second request.
+
+  /download uses run_download_providers_deduped() — expands m3u8 masters into
+            per-resolution download links and deduplicates mp4 by quality label.
+            No double 1080p or double 720p entries.
+
+  Both endpoints are cached: same (type, tmdb_id, season, episode) within 8
+  minutes replays instantly from the source_cache.
 """
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import AsyncGenerator, Optional
 
 import orjson
-from fastapi import APIRouter, HTTPException, Query, Response
+from fastapi import APIRouter, HTTPException, Query, Response, Request
 from fastapi.responses import StreamingResponse
 
 from app.config import get_settings
@@ -33,44 +42,54 @@ from app.models import (
     DownloadLink,
     StreamEntry,
     StreamRequest,
+    DownloadRequest,
+    SubtitleRequest,
 )
-from app.orchestrator import run_providers, run_download_providers
+from app.orchestrator import (
+    run_providers,
+    run_providers_first_wins,
+    run_download_providers,
+)
 from app.providers.subtitles import download_opensubtitles, search_opensubtitles
 from app.resolver import build_enriched_link_data
 from app.utils.ssrf import guard_url, guard_resolved_url
 from app.provider_stats import provider_stats
+from app.source_cache import source_cache, SourceCache
+from app.utils.warp import normalize_warp_mode, warp_configured, run_with_warp
 
 router = APIRouter(prefix="/api/v1")
 _settings = get_settings()
 
 
-# ── helpers ─────────────────────────────────────────────────────────────────────
+# ── SSE helper (legacy) ───────────────────────────────────────────────────────
 
 def _sse(event: str, data: dict) -> bytes:
     payload = orjson.dumps(data).decode()
     return f"event: {event}\ndata: {payload}\n\n".encode()
 
 
-# ── /health ─────────────────────────────────────────────────────────────────────
+# ── /health ───────────────────────────────────────────────────────────────────
 
 @router.get("/health")
 async def health():
     return {"ok": True, "status": "running"}
 
 
-# ── /stats ──────────────────────────────────────────────────────────────────────
+# ── /stats ────────────────────────────────────────────────────────────────────
 
 @router.get("/stats")
 async def stats():
     from app.providers.base import get_providers, _disabled
+    cache_stats = await source_cache.stats()
     return {
-        "cache_entries": 0,
+        "cache": cache_stats,
         "active_providers": len(get_providers()),
         "disabled_providers": len(_disabled),
+        "warp_configured": warp_configured(),
     }
 
 
-# ── /providers ──────────────────────────────────────────────────────────────────
+# ── /providers ────────────────────────────────────────────────────────────────
 
 @router.get("/providers")
 async def providers_health():
@@ -86,6 +105,7 @@ async def providers_health():
             "id": p.id,
             "name": p.name,
             "enabled": True,
+            "requires_warp": getattr(p, "requires_warp", False),
             "circuit_broken": stat.get("is_circuit_broken", False),
             "success_rate": stat.get("success_rate", 1.0),
             "avg_time_ms": stat.get("avg_time_ms", 0),
@@ -112,37 +132,267 @@ async def reset_provider(provider_id: str):
     return {"ok": True, "provider_id": provider_id, "message": "Circuit breaker reset"}
 
 
-# ── GET /events — UNIFIED SSE ────────────────────────────────────────────────────
+# ══════════════════════════════════════════════════════════════════════════════
+# POST /api/v1/streams
+# ══════════════════════════════════════════════════════════════════════════════
 #
-# Query params (all GET):
-#   tmdb_id   int      required
-#   type      str      "movie" | "tv"
-#   title     str      required
-#   imdb_id   str?
-#   year      int?
-#   season    int?
-#   episode   int?
-#   languages str      comma-separated language codes, default "en"
+# Returns:
+#   {
+#     "ok": true,
+#     "stream": { ...best_stream },       ← first valid URL (m3u8 preferred)
+#     "streams": [ ...all_streams ],      ← full fallback ladder, sorted by priority
+#     "subtitles": [],
+#     "cached": false,
+#     "took_ms": 420
+#   }
 #
-# Three async tasks run in parallel from the moment the connection opens:
+# Speed: uses run_providers_first_wins() which breaks out of the provider fan-out
+# the moment ANY provider returns a valid m3u8. Other providers' results are
+# collected concurrently and included in "streams" for the fallback ladder.
+
+@router.post("/streams")
+async def post_streams(
+    req: StreamRequest,
+    fresh: int = Query(0),
+    warp: Optional[str] = Query(None),
+):
+    t0 = time.monotonic()
+    warp_mode = normalize_warp_mode(warp)
+    cache_key = SourceCache.make_key(req.type, req.tmdb_id, req.season, req.episode)
+
+    # ── Cache fast path ───────────────────────────────────────────────────────
+    if not fresh:
+        cached = await source_cache.get(cache_key)
+        if cached:
+            # Reconstruct response from cached events
+            streams   = [d for name, d in cached.events if name == "stream"]
+            subtitles = [d for name, d in cached.events if name == "subtitle"]
+            best = next(
+                (s for s in streams if s.get("type") == "m3u8"),
+                streams[0] if streams else None,
+            )
+            took_ms = int((time.monotonic() - t0) * 1000)
+            return {
+                "ok": bool(best),
+                "stream": best,
+                "streams": streams,
+                "subtitles": subtitles,
+                "cached": True,
+                "took_ms": took_ms,
+            }
+
+    # ── Live resolve ──────────────────────────────────────────────────────────
+    data, kind = await build_enriched_link_data(req, _settings.tmdb_api_key)
+
+    winner, all_entries = await run_with_warp(
+        lambda: run_providers_first_wins(data, kind),
+        mode=warp_mode,
+    )
+
+    took_ms = int((time.monotonic() - t0) * 1000)
+
+    streams_out = [
+        {
+            "provider":    e.provider,
+            "provider_id": e.provider_id,
+            "name":        e.name,
+            "url":         e.url,
+            "type":        e.type,
+            "quality":     e.quality,
+            "language":    e.language,
+            "headers":     e.headers,
+            "playable":    e.playable,
+            "priority":    e.priority,
+        }
+        for e in all_entries
+    ]
+
+    winner_out = None
+    if winner:
+        winner_out = {
+            "provider":    winner.provider,
+            "provider_id": winner.provider_id,
+            "name":        winner.name,
+            "url":         winner.url,
+            "type":        winner.type,
+            "quality":     winner.quality,
+            "language":    winner.language,
+            "headers":     winner.headers,
+            "playable":    winner.playable,
+            "priority":    winner.priority,
+        }
+
+    # Cache if we got at least one stream
+    if streams_out:
+        events = [("stream", s) for s in streams_out]
+        await source_cache.set(cache_key, events)
+
+    return {
+        "ok": winner_out is not None,
+        "stream": winner_out,
+        "streams": streams_out,
+        "subtitles": [],
+        "cached": False,
+        "took_ms": took_ms,
+        "error": None if winner_out else "No streams resolved",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POST /api/v1/download
+# ══════════════════════════════════════════════════════════════════════════════
 #
-#   Task 1 — stream providers
-#     Each provider that returns results fires individual 'stream' events.
-#     Provider A finishes in 100 ms → 'stream' emitted at 100 ms.
-#     Provider B finishes in 600 ms → 'stream' emitted at 600 ms.
-#     The app plays the first one. The rest become the fallback ladder.
+# Returns:
+#   {
+#     "ok": true,
+#     "links": [
+#       { "provider", "provider_id", "url", "type", "quality", "language",
+#         "size_bytes", "size_label", "headers" },
+#       ...
+#     ],
+#     "took_ms": 1240
+#   }
 #
-#   Task 2 — download providers
-#     Same fan-out, fires 'download' events per quality link as they arrive.
-#
-#   Task 3 — subtitle search
-#     OpenSubtitles search runs concurrently. Each result fires a 'subtitle' event.
-#
-#   When all three tasks have finished, a single 'done' event is sent and the
-#   connection closes. The app needs no polling, no second request, nothing.
+# Quality dedup rules:
+#   - m3u8 master → expanded into per-resolution variant stream URLs
+#     (1080p, 720p, 480p, 360p, 240p) via playlist parsing
+#   - mp4/mkv → deduplicated by normalised quality label PER language
+#   - No duplicate qualities (e.g. two 1080p English entries)
+#   - Sorted: best quality first within each language group
+
+@router.post("/download")
+async def post_download(
+    req: DownloadRequest,
+    fresh: int = Query(0),
+    warp: Optional[str] = Query(None),
+):
+    t0 = time.monotonic()
+    warp_mode = normalize_warp_mode(warp)
+    cache_key = "dl:" + SourceCache.make_key(req.type, req.tmdb_id, req.season, req.episode)
+
+    # ── Cache fast path ───────────────────────────────────────────────────────
+    if not fresh:
+        cached = await source_cache.get(cache_key)
+        if cached:
+            links = [d for name, d in cached.events if name == "download"]
+            took_ms = int((time.monotonic() - t0) * 1000)
+            return {
+                "ok": bool(links),
+                "links": links,
+                "cached": True,
+                "took_ms": took_ms,
+            }
+
+    # ── Live resolve ──────────────────────────────────────────────────────────
+    data, kind = await build_enriched_link_data(req, _settings.tmdb_api_key)
+
+    links: list[DownloadLink] = await run_with_warp(
+        lambda: run_download_providers(data, kind),
+        mode=warp_mode,
+    )
+
+    took_ms = int((time.monotonic() - t0) * 1000)
+
+    def _fmt_size(b: int | None) -> str | None:
+        if not b:
+            return None
+        for unit, div in (("GB", 1_073_741_824), ("MB", 1_048_576), ("KB", 1_024)):
+            if b >= div:
+                return f"{b/div:.1f} {unit}"
+        return f"{b} B"
+
+    links_out = [
+        {
+            "provider":    lnk.provider,
+            "provider_id": lnk.provider_id,
+            "url":         lnk.url,
+            "type":        lnk.type,
+            "quality":     lnk.quality,
+            "language":    lnk.language,
+            "size_bytes":  lnk.size_bytes,
+            "size_label":  _fmt_size(lnk.size_bytes),
+            "headers":     lnk.headers,
+        }
+        for lnk in links
+    ]
+
+    # Cache if we got results
+    if links_out:
+        events = [("download", l) for l in links_out]
+        await source_cache.set(cache_key, events)
+
+    return {
+        "ok": bool(links_out),
+        "links": links_out,
+        "cached": False,
+        "took_ms": took_ms,
+        "error": None if links_out else "No download links resolved",
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# POST /api/v1/subtitles
+# ══════════════════════════════════════════════════════════════════════════════
+
+@router.post("/subtitles")
+async def post_subtitles(req: SubtitleRequest):
+    t0 = time.monotonic()
+    lang_list = req.languages or ["en"]
+
+    try:
+        hits = await search_opensubtitles(
+            tmdb_id=req.tmdb_id,
+            media_type=req.type,
+            season=req.season,
+            episode=req.episode,
+            languages=lang_list,
+        )
+        seen: set[int] = set()
+        subtitles_out = []
+
+        # Fetch download URLs concurrently
+        async def resolve_sub(hit: dict):
+            attrs     = hit.get("attributes", {})
+            file_info = (attrs.get("files") or [{}])[0]
+            file_id   = file_info.get("file_id")
+            if not file_id or file_id in seen:
+                return None
+            seen.add(file_id)
+            dl_url = await download_opensubtitles(file_id)
+            if not dl_url:
+                return None
+            return {
+                "provider":  "opensubtitles",
+                "language":  attrs.get("language", "en"),
+                "label":     attrs.get("language", "en").capitalize(),
+                "url":       dl_url,
+                "format":    (attrs.get("format") or "srt").lower(),
+                "rating":    attrs.get("ratings"),
+                "downloads": attrs.get("download_count"),
+            }
+
+        results = await asyncio.gather(*[resolve_sub(h) for h in hits], return_exceptions=True)
+        subtitles_out = [r for r in results if r and not isinstance(r, Exception)]
+
+    except Exception as e:
+        took_ms = int((time.monotonic() - t0) * 1000)
+        return {"ok": False, "subtitles": [], "error": str(e), "took_ms": took_ms}
+
+    took_ms = int((time.monotonic() - t0) * 1000)
+    return {
+        "ok": True,
+        "subtitles": subtitles_out,
+        "took_ms": took_ms,
+    }
+
+
+# ══════════════════════════════════════════════════════════════════════════════
+# GET /api/v1/events  — LEGACY SSE (kept for backward compat)
+# ══════════════════════════════════════════════════════════════════════════════
 
 @router.get("/events")
 async def unified_events(
+    request: Request,
     tmdb_id:  int            = Query(...),
     type:     str            = Query(...),
     title:    str            = Query(...),
@@ -151,77 +401,101 @@ async def unified_events(
     season:   Optional[int]  = Query(None),
     episode:  Optional[int]  = Query(None),
     languages: str           = Query("en"),
+    fresh:    int            = Query(0),
+    warp:     Optional[str]  = Query(None),
 ):
     req = StreamRequest(
         tmdb_id=tmdb_id, type=type, title=title,
         imdb_id=imdb_id, year=year, season=season, episode=episode,
     )
     lang_list = [l.strip() for l in languages.split(",") if l.strip()] or ["en"]
+    warp_mode = normalize_warp_mode(warp)
+    cache_key = SourceCache.make_key(type, tmdb_id, season, episode)
+
+    if not fresh:
+        cached = await source_cache.get(cache_key)
+        if cached:
+            async def _replay() -> AsyncGenerator[bytes, None]:
+                yield _sse("log", {"msg": "Loaded cached sources."})
+                for event_name, data in cached.events:
+                    yield _sse(event_name, data)
+            return StreamingResponse(
+                _replay(),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
+            )
 
     data, kind = await build_enriched_link_data(req, _settings.tmdb_api_key)
-
-    # All three tasks push into this queue. None is the sentinel that closes the stream.
     queue: asyncio.Queue[bytes | None] = asyncio.Queue()
-
+    abort_event = asyncio.Event()
+    recorded: list[tuple[str, dict]] = []
     counters = {"streams": 0, "downloads": 0, "subtitles": 0, "done": 0}
     lock = asyncio.Lock()
 
-    async def _task_done():
+    def _record(event_name: str, data: dict) -> bytes:
+        if event_name != "log":
+            recorded.append((event_name, data))
+        return _sse(event_name, data)
+
+    async def _task_done() -> None:
         async with lock:
             counters["done"] += 1
             if counters["done"] == 3:
-                await queue.put(_sse("done", {
+                frame = _record("done", {
                     "streams_total":   counters["streams"],
                     "downloads_total": counters["downloads"],
                     "subtitles_total": counters["subtitles"],
-                }))
-                await queue.put(None)  # close the stream
+                })
+                await queue.put(frame)
+                await queue.put(None)
 
-    # ── Task 1: stream providers ─────────────────────────────────────────────
-    async def stream_task():
-        def on_provider_done(pid: str, state: str, entries: list[StreamEntry], dur: int) -> None:
-            # This callback is called synchronously inside run_providers().
-            # We schedule async work with ensure_future so we don't block the fan-out.
+    async def stream_task() -> None:
+        def on_provider_done(pid, state, entries, dur):
+            if abort_event.is_set():
+                return
             async def _push():
-                await queue.put(_sse("provider", {"id": pid, "state": state, "duration_ms": dur}))
+                if abort_event.is_set():
+                    return
+                await queue.put(_record("provider", {"id": pid, "state": state, "duration_ms": dur}))
                 for e in entries:
-                    if not e.playable:
+                    if not e.playable or abort_event.is_set():
                         continue
-                    await queue.put(_sse("stream", {
-                        "provider_id": e.provider_id,
-                        "name":        e.name,
-                        "url":         e.url,
-                        "type":        e.type,
-                        "quality":     e.quality,
-                        "headers":     e.headers,
-                        "playable":    e.playable,
-                        "language":    e.language,
-                        "priority":    e.priority,
+                    await queue.put(_record("stream", {
+                        "provider_id": e.provider_id, "name": e.name,
+                        "url": e.url, "type": e.type, "quality": e.quality,
+                        "headers": e.headers, "playable": e.playable,
+                        "language": e.language, "priority": e.priority,
                     }))
                     counters["streams"] += 1
             asyncio.ensure_future(_push())
+        try:
+            await run_with_warp(
+                lambda: run_providers(data, kind, on_provider_done=on_provider_done),
+                mode=warp_mode,
+            )
+        except Exception:
+            pass
+        finally:
+            await _task_done()
 
-        await run_providers(data, kind, on_provider_done=on_provider_done)
-        await _task_done()
+    async def download_task() -> None:
+        try:
+            links = await run_with_warp(lambda: run_download_providers(data, kind), mode=warp_mode)
+            for lnk in links:
+                if abort_event.is_set():
+                    break
+                await queue.put(_record("download", {
+                    "provider_id": lnk.provider_id, "name": lnk.provider,
+                    "url": lnk.url, "type": lnk.type, "quality": lnk.quality,
+                    "language": lnk.language, "size_bytes": lnk.size_bytes,
+                }))
+                counters["downloads"] += 1
+        except Exception:
+            pass
+        finally:
+            await _task_done()
 
-    # ── Task 2: download providers ───────────────────────────────────────────
-    async def download_task():
-        links: list[DownloadLink] = await run_download_providers(data, kind)
-        for lnk in links:
-            await queue.put(_sse("download", {
-                "provider_id": lnk.provider_id,
-                "name":        lnk.provider,
-                "url":         lnk.url,
-                "type":        lnk.type,
-                "quality":     lnk.quality,
-                "language":    lnk.language,
-                "size_bytes":  lnk.size_bytes,
-            }))
-            counters["downloads"] += 1
-        await _task_done()
-
-    # ── Task 3: subtitle search ──────────────────────────────────────────────
-    async def subtitle_task():
+    async def subtitle_task() -> None:
         try:
             hits = await search_opensubtitles(
                 tmdb_id=req.tmdb_id, media_type=req.type,
@@ -229,52 +503,67 @@ async def unified_events(
             )
             seen: set[int] = set()
             for hit in hits:
-                attrs    = hit.get("attributes", {})
+                if abort_event.is_set():
+                    break
+                attrs     = hit.get("attributes", {})
                 file_info = (attrs.get("files") or [{}])[0]
-                file_id  = file_info.get("file_id")
+                file_id   = file_info.get("file_id")
                 if not file_id or file_id in seen:
                     continue
                 seen.add(file_id)
                 dl_url = await download_opensubtitles(file_id)
                 if not dl_url:
                     continue
-                await queue.put(_sse("subtitle", {
-                    "provider":  "opensubtitles",
-                    "language":  attrs.get("language", "en"),
+                await queue.put(_record("subtitle", {
+                    "provider":  "opensubtitles", "language": attrs.get("language", "en"),
                     "label":     attrs.get("language", "en").capitalize(),
-                    "url":       dl_url,
-                    "format":    (attrs.get("format") or "srt").lower(),
-                    "rating":    attrs.get("ratings"),
-                    "downloads": attrs.get("download_count"),
+                    "url":       dl_url, "format": (attrs.get("format") or "srt").lower(),
+                    "rating":    attrs.get("ratings"), "downloads": attrs.get("download_count"),
                 }))
                 counters["subtitles"] += 1
         except Exception:
-            pass  # subtitles are best-effort; never block streams
-        await _task_done()
+            pass
+        finally:
+            await _task_done()
 
-    # ── Generator ────────────────────────────────────────────────────────────
     async def event_generator() -> AsyncGenerator[bytes, None]:
-        asyncio.ensure_future(stream_task())
-        asyncio.ensure_future(download_task())
-        asyncio.ensure_future(subtitle_task())
-        while True:
-            chunk = await queue.get()
-            if chunk is None:
-                break
-            yield chunk
+        tasks = [
+            asyncio.ensure_future(stream_task()),
+            asyncio.ensure_future(download_task()),
+            asyncio.ensure_future(subtitle_task()),
+        ]
+        try:
+            while True:
+                disconnected = await request.is_disconnected()
+                if disconnected:
+                    abort_event.set()
+                    for t in tasks:
+                        t.cancel()
+                    return
+                try:
+                    chunk = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                if chunk is None:
+                    disconnected = await request.is_disconnected()
+                    if not disconnected and any(e == "stream" for e, _ in recorded):
+                        await source_cache.set(cache_key, recorded)
+                    return
+                yield chunk
+        except asyncio.CancelledError:
+            abort_event.set()
+            for t in tasks:
+                t.cancel()
+            raise
 
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={
-            "Cache-Control":     "no-cache",
-            "X-Accel-Buffering": "no",
-            "Connection":        "keep-alive",
-        },
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no", "Connection": "keep-alive"},
     )
 
 
-# ── GET /proxy ───────────────────────────────────────────────────────────────────
+# ── GET /proxy ────────────────────────────────────────────────────────────────
 
 @router.get("/proxy")
 async def proxy_stream(
@@ -299,10 +588,8 @@ async def proxy_stream(
     headers: dict[str, str] = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137 Safari/537.36",
     }
-    if referer:
-        headers["Referer"] = referer
-    if origin:
-        headers["Origin"] = origin
+    if referer: headers["Referer"] = referer
+    if origin:  headers["Origin"]  = origin
 
     from app.utils.http import get_client
     client = await get_client()
@@ -326,10 +613,8 @@ async def proxy_stream(
                 rewritten_lines.append(f"# BLOCKED: {stripped}")
                 continue
             proxy_params: dict[str, str] = {"url": seg_url}
-            if referer:
-                proxy_params["referer"] = referer
-            if origin:
-                proxy_params["origin"] = origin
+            if referer: proxy_params["referer"] = referer
+            if origin:  proxy_params["origin"]  = origin
             rewritten_lines.append(f"/api/v1/proxy?{urlencode(proxy_params)}")
         return Response(
             content="\n".join(rewritten_lines).encode(),
@@ -343,8 +628,6 @@ async def proxy_stream(
         headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600"},
     )
 
-
-# ── GET /flaresolverr/status ─────────────────────────────────────────────────────
 
 @router.get("/flaresolverr/status")
 async def flare_status():

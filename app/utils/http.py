@@ -2,13 +2,20 @@
 Async HTTP layer — mirrors the Node utils/http.ts safeGet / app.get / app.post.
 
 Key design:
-- Single shared httpx.AsyncClient with HTTP/2 + connection pooling (much faster than
-  Node's per-request axios; we reuse TLS sessions across provider calls).
+- Single shared httpx.AsyncClient with HTTP/2 + connection pooling.
 - Per-domain Cloudflare cookie jar (cf_clearance replay).
 - FlareSolverr integration when Cloudflare challenge detected.
-- WARP SOCKS5 proxy routing.
+- WARP SOCKS5 proxy routing — automatically injected from the per-request
+  ContextVar set by run_with_warp(). Providers don't need to pass a proxy
+  arg; just calling app.get() inside a WARP context is enough.
 - BeautifulSoup4 document parsing (lxml backend — fastest available).
 - orjson for JSON (5-10x faster than stdlib json).
+
+WARP integration:
+  warp_proxy() returns the active SOCKS5 URL for the current request, or None.
+  We call it at the start of every public HTTP method so the proxy is always
+  transparently injected. A provider written before WARP existed gets WARP for
+  free with zero code changes.
 """
 from __future__ import annotations
 
@@ -33,7 +40,7 @@ UA = (
 
 _settings = get_settings()
 
-# ── Shared client (HTTP/2, keep-alive, pooled) ───────────────────────────────
+# ── Shared client (HTTP/2, keep-alive, pooled) ────────────────────────────────
 _client: Optional[httpx.AsyncClient] = None
 _client_lock = asyncio.Lock()
 
@@ -149,11 +156,11 @@ async def _do_request(
     """Raw HTTP call via the shared httpx client."""
     client = await get_client()
 
-    # Use WARP proxy if specified
     if proxy:
-        # Create a one-off proxied client for this call
+        # One-off proxied client for WARP SOCKS5 connections.
+        # HTTP/2 disabled — SOCKS proxy doesn't multiplex cleanly.
         async with httpx.AsyncClient(
-            http2=False,  # SOCKS proxy doesn't support HTTP/2 multiplexing well
+            http2=False,
             follow_redirects=True,
             timeout=httpx.Timeout(timeout),
             proxies={"all://": proxy},
@@ -176,7 +183,13 @@ async def _do_request(
 # ── Public helpers ─────────────────────────────────────────────────────────────
 
 class _App:
-    """mirrors Node's `app` object: app.get / app.post"""
+    """
+    mirrors Node's `app` object: app.get / app.post
+
+    WARP is injected automatically — if a WARP context is active (set by
+    run_with_warp() in the orchestrator), warp_proxy() returns the right
+    SOCKS5 URL and it's used for this call. No provider changes needed.
+    """
 
     async def get(
         self,
@@ -188,6 +201,11 @@ class _App:
         max_redirects: int = 10,
         proxy: Optional[str] = None,
     ) -> SpResponse:
+        # Auto-inject WARP proxy from context if caller didn't supply one
+        if proxy is None:
+            from app.utils.warp import warp_proxy
+            proxy = warp_proxy()
+
         h = {**{"User-Agent": UA}, **(headers or {})}
         if referer:
             h["Referer"] = referer
@@ -205,6 +223,11 @@ class _App:
         proxy: Optional[str] = None,
         content_type: str = "application/x-www-form-urlencoded",
     ) -> SpResponse:
+        # Auto-inject WARP proxy from context if caller didn't supply one
+        if proxy is None:
+            from app.utils.warp import warp_proxy
+            proxy = warp_proxy()
+
         h = {**{"User-Agent": UA, "Content-Type": content_type}, **(headers or {})}
         if referer:
             h["Referer"] = referer
@@ -235,7 +258,13 @@ async def safe_get(
     """
     Cloudflare-aware GET — mirrors Node's safeGet.
     Fast path: plain request. On CF challenge → FlareSolverr.
+    WARP proxy is auto-injected from context if not explicitly passed.
     """
+    # Auto-inject WARP proxy from context
+    if proxy is None:
+        from app.utils.warp import warp_proxy
+        proxy = warp_proxy()
+
     if not cloudflare:
         try:
             res = await app.get(url, headers=headers, referer=referer,
@@ -245,9 +274,11 @@ async def safe_get(
         except Exception:
             pass
 
-    # Try FlareSolverr
+    # Try FlareSolverr (WARP-backed endpoint if active)
     if _is_flaresolverr_configured():
-        solved = await _flaresolverr_get(url, timeout=flare_timeout)
+        from app.utils.warp import warp_flaresolverr
+        warp_fs = warp_flaresolverr()
+        solved = await _flaresolverr_get(url, timeout=flare_timeout, endpoint_override=warp_fs)
         if solved:
             set_clearance(url, solved.cookie_header, UA)
             return solved
@@ -257,7 +288,7 @@ async def safe_get(
                          timeout=timeout, params=params, proxy=proxy)
 
 
-# ── FlareSolverr ─────────────────────────────────────────────────────────────
+# ── FlareSolverr ──────────────────────────────────────────────────────────────
 
 _flare_endpoints: list[str] = []
 _flare_idx = 0
@@ -286,8 +317,17 @@ def _next_flare_endpoint() -> Optional[str]:
     return ep
 
 
-async def _flaresolverr_get(url: str, timeout: float = 60.0) -> Optional[SpResponse]:
-    ep = _next_flare_endpoint()
+async def _flaresolverr_get(
+    url: str,
+    timeout: float = 60.0,
+    endpoint_override: Optional[str] = None,
+) -> Optional[SpResponse]:
+    """
+    endpoint_override: pass the WARP-backed FlareSolverr URL to route the
+    browser solve through WARP egress (needed for hosts that block datacenter IPs
+    at the Cloudflare challenge step, not just on the CDN).
+    """
+    ep = endpoint_override or _next_flare_endpoint()
     if not ep:
         return None
     try:
@@ -312,8 +352,7 @@ async def _flaresolverr_get(url: str, timeout: float = 60.0) -> Optional[SpRespo
             if c.get("name") and c.get("value")
         )
         return _build_response(sol.get("status", 200), html, url, cookies)
-    except Exception as exc:
-        # Don't surface; caller falls back to plain request
+    except Exception:
         return None
 
 
