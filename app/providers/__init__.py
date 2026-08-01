@@ -23,10 +23,15 @@ from app.providers.direct_api import (
     VidFastProvider,
     VidRockProvider,
     HexaProvider,
+    HexaSUProvider,        # new: real HexaSU API flow (replaces old stub)
     XpassProvider,
     VaplayerProvider,
+    VaplayerV2Provider,    # new: correct streamdata.vaplayer.ru endpoint
     DahmerMoviesProvider,
 )
+
+# ── PrimeVids ─────────────────────────────────────────────────────────────────
+from app.providers.primevids import PrimeVidsProvider
 
 # ── RiveStream ────────────────────────────────────────────────────────────────
 from app.providers.rivestream import RiveStreamProvider
@@ -46,8 +51,8 @@ from app.providers.specialty import (
 from app.providers.indian import (
     VegaMoviesProvider,
     HdHub4uProvider,
-    FourKHdHubProvider,
-    Movies4uProvider,
+    FourKHdHubProvider,    # now fully implemented (was stub)
+    Movies4uProvider,      # now fully implemented (was stub)
     RogMoviesProvider,
     MultiMoviesProvider,
     UhdMoviesProvider,
@@ -81,12 +86,17 @@ def init_providers() -> None:
     _reg(TwoEmbedProvider())
     _reg(VidFastProvider())
     _reg(VidRockProvider())
-    _reg(HexaProvider())
+    _reg(HexaSUProvider())         # new: real HexaSU 4-step API flow
     _reg(RiveStreamProvider())
     _reg(AllMovieLandProvider())
     _reg(XpassProvider())
-    _reg(VaplayerProvider())
+    _reg(VaplayerV2Provider())     # new: corrected streamdata.vaplayer.ru endpoint
     _reg(DahmerMoviesProvider())
+    # PrimeVids: embed aggregator (movie + series + asian)
+    _reg(PrimeVidsProvider(), kinds=["movie", "series", "asian"])
+    # Old stub providers kept as disabled for reference
+    register_disabled(HexaProvider())
+    register_disabled(VaplayerProvider())
 
     # === Asian drama ===
     _reg(KissKhProvider(), kinds=["asian"])

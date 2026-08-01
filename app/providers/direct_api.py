@@ -461,3 +461,135 @@ class DahmerMoviesProvider(Provider):
         except Exception:
             pass
         return result
+
+
+# ══════════════════════════════════════════════════════════════════
+# HexaSU  (replaces the old stub HexaProvider — new API flow)
+# ══════════════════════════════════════════════════════════════════
+#
+# Flow (ported from StreamPlay hexa.ts):
+#   1. Generate a random 32-byte hex API key.
+#   2. GET enc-dec.app/api/enc-hexa with X-Api-Key → cap token.
+#   3. GET theemoviedb.hexa.su /api/tmdb/{movie|tv}/… with X-Cap-Token → encrypted blob.
+#   4. POST enc-dec.app/api/dec-hexa { text, key } → { result: { sources: [{server, url}] } }
+#
+# The old HexaProvider used a single data-key attribute and is now dead upstream.
+# This class uses the id "hexasu" to avoid collision.
+
+import os
+import secrets
+
+
+class HexaSUProvider(Provider):
+    id = "hexasu"
+    name = "HexaSU"
+
+    async def invoke(self, data: LinkData) -> ExtractorResult:
+        result = ExtractorResult()
+        if data.is_anime or not data.id:
+            return result
+        try:
+            api_key = secrets.token_hex(32)           # random 32-byte hex, fresh per request
+            base_headers = {
+                "User-Agent": UA,
+                "Referer": "https://hexa.su/",
+                "Accept": "text/plain",
+                "X-Fingerprint-Lite": "e9136c41504646444",
+                "X-Api-Key": api_key,
+            }
+
+            # Step 1+2: obtain cap token from enc-dec service
+            enc = await enc_dec_get("enc-hexa", headers=base_headers)
+            token = (enc or {}).get("result", {}).get("token") if isinstance((enc or {}).get("result"), dict) else None
+            if not token:
+                return result
+
+            hexa_headers = {**base_headers, "X-Cap-Token": token}
+
+            # Step 3: fetch encrypted sources blob
+            hexa_api = "https://theemoviedb.hexa.su"
+            if data.season is None:
+                url = f"{hexa_api}/api/tmdb/movie/{data.id}/images"
+            else:
+                url = f"{hexa_api}/api/tmdb/tv/{data.id}/season/{data.season}/episode/{data.episode}/images"
+
+            res = await safe_get(url, headers=hexa_headers)
+            if not res or not res.is_successful or not res.text:
+                return result
+            encrypted = res.text
+
+            # Step 4: decrypt
+            dec = await enc_dec_post("dec-hexa", {"text": encrypted, "key": api_key})
+            sources = ((dec or {}).get("result") or {}).get("sources") or []
+            for src in sources:
+                src_url = src.get("url") or ""
+                server = src.get("server") or "server"
+                if not src_url:
+                    continue
+                name = server[0].upper() + server[1:] if server else "Server"
+                result.streams.append(Stream(
+                    server=f"HexaSU {name}",
+                    link=src_url,
+                    type="m3u8" if ".m3u8" in src_url else "mp4",
+                    headers={"Referer": "https://hexa.su/"},
+                ))
+        except Exception:
+            pass
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════
+# Vaplayer  (corrected — uses the real streamdata.vaplayer.ru API)
+# ══════════════════════════════════════════════════════════════════
+#
+# Flow (ported from StreamPlay vaplayer.ts):
+#   GET streamdata.vaplayer.ru/api.php?tmdb=<id>&type=movie|tv[&season=&episode=]
+#   Response: { data: { stream_urls: [string] }, default_subs: [{lang, code, url}] }
+#
+# The old VaplayerProvider targeted vaplayer.xyz which is now dead.
+
+class VaplayerV2Provider(Provider):
+    id = "vaplayer"
+    name = "Vaplayer"
+
+    async def invoke(self, data: LinkData) -> ExtractorResult:
+        result = ExtractorResult()
+        if not data.id:
+            return result
+        try:
+            base = "https://streamdata.vaplayer.ru"
+            referer = "https://nextgencloudfabric.com/"
+            if data.season is None:
+                url = f"{base}/api.php?tmdb={data.id}&type=movie"
+            else:
+                url = f"{base}/api.php?tmdb={data.id}&type=tv&season={data.season}&episode={data.episode}"
+
+            res = await safe_get(url, headers={"Referer": referer, "User-Agent": UA})
+            if not res or not res.is_successful:
+                return result
+
+            j = res.json() or {}
+            stream_urls: list = (j.get("data") or {}).get("stream_urls") or []
+            subs: list = j.get("default_subs") or []
+
+            from app.models import Subtitle
+            for sub in subs:
+                sub_url = sub.get("url") or ""
+                if sub_url:
+                    result.subtitles.append(Subtitle(
+                        language=sub.get("lang") or sub.get("code") or "Unknown",
+                        url=sub_url,
+                    ))
+
+            for i, stream_url in enumerate(stream_urls):
+                if not stream_url:
+                    continue
+                result.streams.append(Stream(
+                    server=f"Vaplayer Server {i + 1}",
+                    link=stream_url,
+                    type="m3u8" if ".m3u8" in stream_url else "mp4",
+                    headers={"Referer": referer},
+                ))
+        except Exception:
+            pass
+        return result

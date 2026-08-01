@@ -347,3 +347,6 @@ if _os.environ.get("TORRENT_ENABLED", "").lower() in ("1", "true", "yes"):
     register(TorrentMovieProvider())
     register(TorrentTvProvider())
     register(TorrentAnimeProvider())
+    # EZTV: real JSON API for TV show torrents — no scraping, very reliable
+    from app.providers.eztv import EztvProvider
+    register(EztvProvider())

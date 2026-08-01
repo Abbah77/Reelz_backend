@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import re
 from typing import Optional
+from urllib.parse import quote
 
 from app.models import LinkData, ExtractorResult, Stream
 from app.providers.base import Provider
@@ -292,11 +293,7 @@ class _GenericCfProvider(Provider):
         return result
 
 
-class FourKHdHubProvider(_GenericCfProvider):
-    id = "fourkhdhub"
-    name = "FourKHdHub"
-    _domain_key = "fourkhdhub"
-    kinds = ["movie", "series", "asian"]
+# FourKHdHubProvider — full implementation below (title-matched scraper)
 
 
 class RogMoviesProvider(_GenericCfProvider):
@@ -313,11 +310,7 @@ class MultiMoviesProvider(_GenericCfProvider):
     kinds = ["movie", "series", "asian"]
 
 
-class Movies4uProvider(_GenericCfProvider):
-    id = "movies4u"
-    name = "Movies4u"
-    _domain_key = "movies4u"
-    kinds = ["movie", "series", "asian"]
+# Movies4uProvider — full implementation below (IMDB-verified scraper)
 
 
 class UhdMoviesProvider(_GenericCfProvider):
@@ -353,3 +346,227 @@ class CineMacityProvider(_GenericCfProvider):
     name = "CineMacity"
     _domain_key = "cinemacity"
     kinds = ["movie", "series", "asian"]
+
+
+# ══════════════════════════════════════════════════════════════════
+# 4kHDHub
+# ══════════════════════════════════════════════════════════════════
+#
+# Flow (ported from StreamPlay fourkhdhub.ts):
+#   1. GET <domain>/?s=<title> (CF-gated) → div.card-grid > a.movie-card
+#   2. Match card by normalized title (+ year). Open matched href.
+#   3. movie:  div.download-item a → getRedirectLinks → load_extractor
+#      tv:     div.episode-download-item matching "Sxx[Exx]" → div.episode-links > a → load_extractor
+#
+# Domain fetched from the shared _DOMAINS dict (key: "fourkhdhub") — update there on rotation.
+
+def _pad2(n) -> str:
+    return f"0{n}" if n is not None and int(n) < 10 else str(n) if n is not None else ""
+
+
+class FourKHdHubProvider(Provider):
+    id = "fourkhdhub"
+    name = "4kHDHub"
+    kinds = ["movie", "series", "asian"]
+
+    async def invoke(self, data: LinkData) -> ExtractorResult:
+        result = ExtractorResult()
+        domain = _DOMAINS.get("fourkhdhub", "")
+        title = (data.title or "").strip()
+        if not domain or not title:
+            return result
+        try:
+            norm_title = _norm(title)
+            year_str = str(data.year) if data.year else None
+
+            search_res = await safe_get(
+                f"{domain}/?s={quote(title)}",
+                cloudflare=True,
+            )
+            if not search_res or not search_res.is_successful:
+                return result
+            soup = search_res.document
+
+            cards = soup.find_all("a", class_="movie-card")
+
+            def card_text(el) -> str:
+                content = el.find("div", class_="movie-card-content")
+                return _norm(content.get_text() if content else "")
+
+            matched = None
+            for el in cards:
+                ct = card_text(el)
+                if norm_title in ct and (year_str is None or year_str in ct):
+                    matched = el
+                    break
+            if not matched:
+                for el in cards:
+                    if norm_title in card_text(el):
+                        matched = el
+                        break
+            if not matched:
+                return result
+
+            href = matched.get("href", "")
+            page_url = href if href.startswith("http") else f"{domain}{href}"
+            doc_res = await safe_get(page_url, cloudflare=True)
+            if not doc_res or not doc_res.is_successful:
+                return result
+            doc = doc_res.document
+
+            hrefs: list[str] = []
+            if data.season is None:
+                for a in doc.find_all("a"):
+                    parent = a.find_parent("div", class_="download-item")
+                    if parent:
+                        h = a.get("href", "")
+                        if h:
+                            hrefs.append(h)
+            else:
+                s_text = f"S{_pad2(data.season)}"
+                e_text = f"E{_pad2(data.episode)}" if data.episode is not None else None
+                for item in doc.find_all("div", class_="episode-download-item"):
+                    item_text = item.get_text()
+                    if s_text.lower() not in item_text.lower():
+                        continue
+                    if e_text and e_text.lower() not in item_text.lower():
+                        continue
+                    for a in (item.find("div", class_="episode-links") or item).find_all("a"):
+                        h = a.get("href", "")
+                        if h:
+                            hrefs.append(h)
+
+            async def resolve(href: str) -> None:
+                try:
+                    from app.utils.common import get_redirect_links
+                    source = await get_redirect_links(href) or href
+                    hosted = await load_extractor(source, "")
+                    for s in hosted.streams:
+                        s.server = f"4kHDHub {s.server}"
+                        result.streams.append(s)
+                    result.subtitles.extend(hosted.subtitles)
+                except Exception:
+                    pass
+
+            await asyncio.gather(*[resolve(h) for h in hrefs])
+        except Exception:
+            pass
+        return result
+
+
+# ══════════════════════════════════════════════════════════════════
+# Movies4u
+# ══════════════════════════════════════════════════════════════════
+#
+# Flow (ported from StreamPlay movies4u.ts):
+#   1. GET <domain>/?s=<title year> → article h2 a / article h3 a candidate posts
+#   2. Each post: verify IMDB id from "p a:contains(IMDb Rating)" href
+#   3. movie:  div.download-links-div a.btn → inner page → div.downloads-btns-div a.btn → load_extractor
+#      tv:     div.downloads-btns-div whose prev sibling contains "Season N" →
+#              first non-zip a.btn → episode page → Nth downloads-btns-div → a.btn → load_extractor
+#
+# Requires IMDB id for verification — skips silently if unavailable.
+
+class Movies4uProvider(Provider):
+    id = "movies4u"
+    name = "Movies4u"
+    kinds = ["movie", "series", "asian"]
+
+    async def invoke(self, data: LinkData) -> ExtractorResult:
+        result = ExtractorResult()
+        domain = _DOMAINS.get("movies4u", "")
+        want_imdb = data.imdb_id
+        if not domain or not want_imdb:
+            return result
+        try:
+            query = f"{data.title or ''} {data.year or ''}".strip()
+            search_res = await safe_get(
+                f"{domain}/?s={quote(query)}",
+                cloudflare=True,
+            )
+            if not search_res or not search_res.is_successful:
+                return result
+            soup = search_res.document
+
+            post_urls: list[str] = []
+            for tag in ("h2", "h3"):
+                for a in soup.find_all(tag):
+                    link = a.find("a")
+                    if link:
+                        h = link.get("href", "")
+                        if h and h not in post_urls:
+                            post_urls.append(h)
+
+            host_urls: set[str] = set()
+
+            for post_url in post_urls:
+                post_res = await safe_get(post_url, cloudflare=True)
+                if not post_res or not post_res.is_successful:
+                    continue
+                post_doc = post_res.document
+
+                # Verify IMDB id
+                imdb_a = post_doc.find("a", string=re.compile("IMDb Rating", re.I))
+                if not imdb_a:
+                    continue
+                imdb_href = imdb_a.get("href", "")
+                parts = imdb_href.split("title/")
+                extracted_imdb = parts[1].split("/")[0] if len(parts) > 1 else ""
+                if extracted_imdb != want_imdb:
+                    continue
+
+                if data.season is None:
+                    # Movie: download-links-div → inner page
+                    dl_div = post_doc.find("div", class_="download-links-div")
+                    inner_a = dl_div.find("a", class_="btn") if dl_div else None
+                    inner_url = inner_a.get("href", "") if inner_a else ""
+                    if not inner_url:
+                        continue
+                    inner_res = await safe_get(inner_url, cloudflare=True)
+                    if not inner_res or not inner_res.is_successful:
+                        continue
+                    inner_doc = inner_res.document
+                    for a in inner_doc.find_all("a", class_="btn"):
+                        h = a.get("href", "")
+                        if h:
+                            host_urls.add(h)
+                else:
+                    # TV: find "Season N" block
+                    for block in post_doc.find_all("div", class_="downloads-btns-div"):
+                        prev = block.find_previous_sibling()
+                        header_text = prev.get_text() if prev else ""
+                        if not re.search(rf"Season\s+{data.season}", header_text, re.I):
+                            continue
+                        season_link = ""
+                        for a in block.find_all("a", class_="btn"):
+                            if not re.search(r"zip", a.get_text(), re.I):
+                                season_link = a.get("href", "")
+                                break
+                        if not season_link:
+                            continue
+                        ep_res = await safe_get(season_link, cloudflare=True)
+                        if not ep_res or not ep_res.is_successful:
+                            continue
+                        ep_doc = ep_res.document
+                        ep_blocks = ep_doc.find_all("div", class_="downloads-btns-div")
+                        ep_idx = (data.episode or 1) - 1
+                        if 0 <= ep_idx < len(ep_blocks):
+                            for a in ep_blocks[ep_idx].find_all("a", class_="btn"):
+                                h = a.get("href", "")
+                                if h:
+                                    host_urls.add(h)
+
+            async def resolve(host_url: str) -> None:
+                try:
+                    hosted = await load_extractor(host_url, "")
+                    for s in hosted.streams:
+                        s.server = f"Movies4u {s.server}"
+                        result.streams.append(s)
+                    result.subtitles.extend(hosted.subtitles)
+                except Exception:
+                    pass
+
+            await asyncio.gather(*[resolve(u) for u in host_urls])
+        except Exception:
+            pass
+        return result
