@@ -263,6 +263,7 @@ async def post_streams(
 @router.post("/download")
 async def post_download(
     req: DownloadRequest,
+    request: Request,
     fresh: int = Query(0),
     warp: Optional[str] = Query(None),
 ):
@@ -301,17 +302,41 @@ async def post_download(
                 return f"{b/div:.1f} {unit}"
         return f"{b} B"
 
+    def _build_download_url(lnk) -> str | None:
+        """
+        Build a /download-proxy URL for links that need headers (Referer/Origin)
+        to be served, or for direct mp4 links so the browser gets
+        Content-Disposition: attachment and a proper filename.
+        For m3u8 variant playlists there is no single downloadable file,
+        so we skip proxy wrapping and let the client handle HLS directly.
+        """
+        from urllib.parse import urlencode, quote
+        if lnk.type == "m3u8":
+            # HLS playlists: no single file to download, return raw URL
+            return lnk.url
+        params: dict[str, str] = {"url": lnk.url}
+        if lnk.headers.get("Referer"):
+            params["referer"] = lnk.headers["Referer"]
+        if lnk.headers.get("Origin"):
+            params["origin"] = lnk.headers["Origin"]
+        quality = lnk.quality or "video"
+        ext = "mkv" if lnk.type == "mkv" else "mp4"
+        params["filename"] = f"{req.title} {quality}.{ext}"
+        base_url = str(request.base_url).rstrip("/")
+        return f"{base_url}/api/v1/download-proxy?{urlencode(params)}"
+
     links_out = [
         {
-            "provider":    lnk.provider,
-            "provider_id": lnk.provider_id,
-            "url":         lnk.url,
-            "type":        lnk.type,
-            "quality":     lnk.quality,
-            "language":    lnk.language,
-            "size_bytes":  lnk.size_bytes,
-            "size_label":  _fmt_size(lnk.size_bytes),
-            "headers":     lnk.headers,
+            "provider":      lnk.provider,
+            "provider_id":   lnk.provider_id,
+            "url":           lnk.url,           # original URL (may need headers)
+            "download_url":  _build_download_url(lnk),  # ready-to-use download link
+            "type":          lnk.type,
+            "quality":       lnk.quality,
+            "language":      lnk.language,
+            "size_bytes":    lnk.size_bytes,
+            "size_label":    _fmt_size(lnk.size_bytes),
+            "headers":       lnk.headers,
         }
         for lnk in links
     ]
@@ -626,6 +651,79 @@ async def proxy_stream(
         content=upstream.content,
         media_type=content_type,
         headers={"Access-Control-Allow-Origin": "*", "Cache-Control": "public, max-age=3600"},
+    )
+
+
+@router.get("/download-proxy")
+async def download_proxy(
+    url:      str           = Query(..., description="Direct media URL to proxy as a download"),
+    filename: Optional[str] = Query(None, description="Override filename for Content-Disposition"),
+    referer:  Optional[str] = Query(None),
+    origin:   Optional[str] = Query(None),
+):
+    """
+    Proxy a direct mp4/mkv/m3u8 URL and force browser file download via
+    Content-Disposition: attachment.  This is the missing piece for the
+    /api/v1/download endpoint — stream URLs that require Referer/Origin
+    headers can't be downloaded directly by a browser or mobile app, but
+    they can be tunnelled through here.
+
+    Usage: GET /api/v1/download-proxy?url=<encoded_url>&filename=movie.mp4
+    """
+    from urllib.parse import unquote
+    import posixpath
+
+    blocked = guard_url(url)
+    if blocked:
+        raise HTTPException(status_code=403, detail=f"Blocked: {blocked}")
+
+    blocked_resolved = await guard_resolved_url(url)
+    if blocked_resolved:
+        raise HTTPException(status_code=403, detail=f"Blocked: {blocked_resolved}")
+
+    allowed_extensions = (".m3u8", ".ts", ".mp4", ".mkv", ".webm", ".vtt", ".srt")
+    if not any(ext in url.lower() for ext in allowed_extensions):
+        raise HTTPException(status_code=400, detail="Only media file URLs may be proxied for download")
+
+    req_headers: dict[str, str] = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137 Safari/537.36",
+    }
+    if referer: req_headers["Referer"] = referer
+    if origin:  req_headers["Origin"]  = origin
+
+    from app.utils.http import get_client
+    client = await get_client()
+    try:
+        upstream = await client.get(url, headers=req_headers, follow_redirects=True, timeout=30)
+    except Exception as exc:
+        raise HTTPException(status_code=502, detail=str(exc))
+
+    if upstream.status_code >= 400:
+        raise HTTPException(status_code=upstream.status_code, detail="Upstream returned error")
+
+    content_type = upstream.headers.get("content-type", "application/octet-stream")
+
+    # Derive a sensible filename
+    if not filename:
+        path = posixpath.basename(str(upstream.url).split("?")[0])
+        filename = unquote(path) if path else "download.mp4"
+
+    # Sanitise filename
+    filename = filename.replace('"', "'").replace("\n", "").replace("\r", "")
+
+    resp_headers = {
+        "Content-Disposition": f'attachment; filename="{filename}"',
+        "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "public, max-age=3600",
+    }
+    cl = upstream.headers.get("content-length")
+    if cl:
+        resp_headers["Content-Length"] = cl
+
+    return Response(
+        content=upstream.content,
+        media_type=content_type,
+        headers=resp_headers,
     )
 
 

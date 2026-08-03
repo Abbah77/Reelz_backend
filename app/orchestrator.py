@@ -368,9 +368,14 @@ async def run_providers(
 # ── DOWNLOAD: expand m3u8 → per-resolution + dedup mp4 by quality ─────────────
 
 _DOWNLOAD_PROVIDER_IDS = {
+    # Indian download-link providers (direct mp4/mkv)
     "vegamovies", "hdhub4u", "fourkhdhub", "rogmovies",
     "multimovies", "movies4u", "uhdmovies", "moviesmod",
     "topmovies", "bollyflix", "cinemacity",
+    # Stream providers that also surface direct mp4/m3u8 links
+    "rivestream", "allmovieland", "vidfast", "vidrock",
+    "hexa", "xpass", "vaplayer", "dahmermovies", "hexasu",
+    "hdrezka", "castle",
 }
 
 # Standard quality labels normalised for dedup
@@ -404,6 +409,36 @@ def _normalise_quality(raw: str | None) -> str:
         if h >= 300:  return "360p"
         return "240p"
     return raw.strip() or "unknown"
+
+
+async def _resolve_direct_url(url: str, headers: dict) -> str | None:
+    """
+    Follow redirects on a URL to see if it lands on a direct .mp4/.mkv file.
+    Returns the final URL if it's a direct media file, else None.
+    This is what makes mp4 links actually downloadable — many providers
+    return a redirect chain that terminates at a CDN mp4.
+    """
+    try:
+        from app.utils.http import get_client
+        client = await get_client()
+        hdrs = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137 Safari/537.36",
+            **headers,
+        }
+        # Use HEAD to avoid downloading the whole file body
+        r = await client.head(url, headers=hdrs, timeout=8, follow_redirects=True)
+        final_url = str(r.url)
+        content_type = r.headers.get("content-type", "")
+        # Accept if URL or content-type signals a direct video file
+        is_direct = (
+            any(ext in final_url.lower() for ext in (".mp4", ".mkv", ".webm"))
+            or any(ct in content_type for ct in ("video/", "application/octet-stream"))
+        )
+        if is_direct:
+            return final_url
+    except Exception:
+        pass
+    return None
 
 
 async def _fetch_m3u8_resolutions(
@@ -599,8 +634,26 @@ async def run_download_providers(
                 lnk.quality = q_norm
                 m3u8_links.append(lnk)
 
-    # Combine: m3u8 per-resolution first (more reliable), then mp4
-    all_links = m3u8_links + mp4_links
+    # Resolve mp4 links: follow redirect chains to get the real CDN URL.
+    # Many providers return a bounce URL that only resolves to a direct mp4
+    # after following 1–3 redirects. Without this step the client gets a
+    # redirect URL that requires Referer/cookies it doesn't have.
+    async def resolve_mp4_link(lnk: DownloadLink) -> None:
+        if lnk.type in ("mp4", "mkv") and lnk.url:
+            resolved = await _resolve_direct_url(lnk.url, lnk.headers)
+            if resolved and resolved != lnk.url:
+                lnk.url = resolved
+                # Clear headers that were specific to the redirect chain
+                lnk.headers = {}
+
+    await asyncio.gather(
+        *[resolve_mp4_link(lnk) for lnk in mp4_links],
+        return_exceptions=True,
+    )
+
+    # Combine: direct mp4/mkv first (immediately downloadable), then m3u8
+    # m3u8 links are kept as fallback for clients that can handle HLS
+    all_links = mp4_links + m3u8_links
 
     # Probe file sizes for direct mp4/mkv links in parallel.
     # Skip m3u8 — variant playlists don't have a meaningful Content-Length.
