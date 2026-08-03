@@ -86,8 +86,13 @@ class VegaMoviesProvider(Provider):
                 return result
             main_soup = main.document
 
-            async def push_hosted(src_url: str) -> None:
+            _vega_quality_re = re.compile(r"480p|720p|1080p|2160p|4K", re.I)
+
+            async def push_hosted(src_url: str, q_hint: Optional[str] = None) -> None:
                 r = await load_extractor(src_url, api, "VegaMovies")
+                for s in r.streams:
+                    if not s.quality and q_hint:
+                        s.quality = q_hint
                 result.streams.extend([Stream(**{**s.model_dump()}) for s in r.streams])
                 result.subtitles.extend(r.subtitles)
 
@@ -102,11 +107,20 @@ class VegaMoviesProvider(Provider):
                     try:
                         doc = (await safe_get(page_url, referer=api, headers=_VEGA_HEADERS, cloudflare=True)).document
                         for btn in doc.find_all("button", class_="btn"):
-                            if re.search(r"V-Cloud", btn.get_text(), re.I):
+                            btn_text = btn.get_text()
+                            if re.search(r"V-Cloud", btn_text, re.I):
+                                # Extract quality from button text if present
+                                qm = _vega_quality_re.search(btn_text)
+                                q_hint = None
+                                if qm:
+                                    raw = qm.group(0).lower()
+                                    q_hint = "2160p" if raw in ("2160p", "4k") else raw
+                                    if not q_hint.endswith("p"):
+                                        q_hint += "p"
                                 parent = btn.parent
                                 href = parent.get("href") if parent else None
                                 if href:
-                                    await push_hosted(href)
+                                    await push_hosted(href, q_hint)
                     except Exception:
                         pass
             else:
@@ -221,7 +235,11 @@ class HdHub4uProvider(Provider):
                         # Movies: h3/h4 quality links
                         for tag in post_doc.find_all(["h3", "h4"]):
                             for a in tag.find_all("a", href=True):
-                                if _QUALITY_RE.search(a.get_text()):
+                                qm = _QUALITY_RE.search(a.get_text())
+                                if qm:
+                                    q_hint = qm.group(0).strip().lower()
+                                    if not q_hint.endswith("p"):
+                                        q_hint += "p"
                                     href = a["href"]
                                     if "id=" in href:
                                         # redirect resolve
@@ -230,6 +248,9 @@ class HdHub4uProvider(Provider):
                                         if loc:
                                             href = loc
                                     r = await load_extractor(href, post_url, "HDHub4u")
+                                    for s in r.streams:
+                                        if not s.quality:
+                                            s.quality = q_hint
                                     result.streams.extend(r.streams)
                                     result.subtitles.extend(r.subtitles)
                     else:
@@ -284,8 +305,21 @@ class _GenericCfProvider(Provider):
                 return result
             post_doc = (await safe_get(post_url, referer=base, cloudflare=True)).document
             for a in post_doc.find_all("a", href=True):
-                if self._quality_re.search(a.get_text()) or re.search(r"download|server", a.get_text(), re.I):
+                link_text = a.get_text()
+                quality_match = self._quality_re.search(link_text)
+                if quality_match or re.search(r"download|server", link_text, re.I):
+                    # Normalise quality label from anchor text
+                    q_hint = None
+                    if quality_match:
+                        raw = quality_match.group(0).lower()
+                        q_hint = "2160p" if raw in ("2160p", "4k") else raw
+                        if not q_hint.endswith("p"):
+                            q_hint = q_hint + "p"
                     r = await load_extractor(a["href"], post_url, self.name)
+                    # Backfill quality on streams that came back without one
+                    for s in r.streams:
+                        if not s.quality and q_hint:
+                            s.quality = q_hint
                     result.streams.extend(r.streams)
                     result.subtitles.extend(r.subtitles)
         except Exception:

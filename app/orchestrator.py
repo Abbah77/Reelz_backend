@@ -38,6 +38,28 @@ from app.config import get_settings
 _settings = get_settings()
 
 
+# ── File-size prober (HEAD request for direct mp4/mkv CDN links) ──────────────
+
+async def _probe_size(url: str, headers: dict) -> int | None:
+    """HEAD-probe a direct URL for its Content-Length."""
+    try:
+        from app.utils.http import get_client
+        client = await get_client()
+        hdrs = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)",
+            **headers,
+        }
+        r = await client.head(
+            url, headers=hdrs, timeout=5, follow_redirects=True
+        )
+        cl = r.headers.get("content-length")
+        val = int(cl) if cl else None
+        # Sanity check: reject implausibly small values (< 1 MB)
+        return val if val and val > 1_000_000 else None
+    except Exception:
+        return None
+
+
 # ── Priority scoring ──────────────────────────────────────────────────────────
 
 _QUALITY_SCORES: dict[str, int] = {
@@ -390,6 +412,7 @@ async def _fetch_m3u8_resolutions(
     provider: str,
     provider_id: str,
     language: str,
+    original_quality: str | None = None,
 ) -> list[DownloadLink]:
     """
     Fetch an m3u8 master playlist and extract per-resolution stream URLs.
@@ -476,13 +499,13 @@ async def _fetch_m3u8_resolutions(
     except Exception:
         pass
 
-    # Fallback: return the master URL as a single "Auto" entry
+    # Fallback: return the master URL — preserve known quality label if available
     return [DownloadLink(
         provider=provider,
         provider_id=provider_id,
         url=url,
         type="m3u8",
-        quality="Auto",
+        quality=original_quality or "Auto",  # preserve known label from anchor context
         language=language,
         headers=headers,
     )]
@@ -555,7 +578,8 @@ async def run_download_providers(
     # Expand m3u8 masters in parallel
     expand_tasks = [
         _fetch_m3u8_resolutions(
-            lnk.url, lnk.headers, lnk.provider, lnk.provider_id, lnk.language
+            lnk.url, lnk.headers, lnk.provider, lnk.provider_id, lnk.language,
+            lnk.quality,   # pass known quality label so fallback preserves it
         )
         for lnk in raw_links
     ]
@@ -577,6 +601,17 @@ async def run_download_providers(
 
     # Combine: m3u8 per-resolution first (more reliable), then mp4
     all_links = m3u8_links + mp4_links
+
+    # Probe file sizes for direct mp4/mkv links in parallel.
+    # Skip m3u8 — variant playlists don't have a meaningful Content-Length.
+    async def fill_size(lnk: DownloadLink) -> None:
+        if lnk.size_bytes is None and lnk.type != "m3u8":
+            lnk.size_bytes = await _probe_size(lnk.url, lnk.headers)
+
+    await asyncio.gather(
+        *[fill_size(lnk) for lnk in all_links],
+        return_exceptions=True,
+    )
 
     # Sort by resolution descending within each language
     order = {q: i for i, q in enumerate(_RESOLUTION_ORDER)}

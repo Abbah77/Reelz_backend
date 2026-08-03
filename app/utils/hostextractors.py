@@ -155,7 +155,7 @@ async def _resolve_packed_player(url: str, referer: Optional[str], server_name: 
                 server=server_name,
                 link=link,
                 type="m3u8",
-                quality="1080p",
+                quality=None,        # caller will backfill from anchor context
                 headers={"Referer": referer or base, "Origin": base},
             ))
 
