@@ -276,13 +276,33 @@ async def post_download(
         cached = await source_cache.get(cache_key)
         if cached:
             links = [d for name, d in cached.events if name == "download"]
-            took_ms = int((time.monotonic() - t0) * 1000)
-            return {
-                "ok": bool(links),
-                "links": links,
-                "cached": True,
-                "took_ms": took_ms,
-            }
+            # Quick liveness spot-check: if any link has a raw `url` field,
+            # HEAD it to confirm it isn't a dead CDN URL before serving stale data.
+            # We only check the first link to keep latency low — if it's dead,
+            # bust the cache and re-resolve everything.
+            if links:
+                sample_url = links[0].get("url") if isinstance(links[0], dict) else getattr(links[0], "url", None)
+                if sample_url:
+                    try:
+                        from app.utils.http import get_client as _get_client
+                        _cl = await _get_client()
+                        _r = await _cl.head(sample_url, timeout=4, follow_redirects=True)
+                        _alive = _r.status_code < 400
+                    except Exception:
+                        _alive = False
+                    if not _alive:
+                        # Evict stale cache entry and fall through to live resolve
+                        await source_cache.delete(cache_key) if hasattr(source_cache, "delete") else None
+                        links = []
+
+            if links:
+                took_ms = int((time.monotonic() - t0) * 1000)
+                return {
+                    "ok": True,
+                    "links": links,
+                    "cached": True,
+                    "took_ms": took_ms,
+                }
 
     # ── Live resolve ──────────────────────────────────────────────────────────
     data, kind = await build_enriched_link_data(req, _settings.tmdb_api_key)
@@ -304,17 +324,30 @@ async def post_download(
 
     def _build_download_url(lnk) -> str | None:
         """
-        Build a /download-proxy URL for links that need headers (Referer/Origin)
-        to be served, or for direct mp4 links so the browser gets
-        Content-Disposition: attachment and a proper filename.
-        For m3u8 variant playlists there is no single downloadable file,
-        so we skip proxy wrapping and let the client handle HLS directly.
+        Build the best download URL for a link:
+
+        - mp4 / mkv  → always route through /api/v1/download-proxy so the
+                        browser receives Content-Disposition: attachment and any
+                        required Referer/Origin headers are injected server-side.
+        - m3u8       → route through /api/v1/proxy so the playlist is rewritten
+                        with proxied segment URLs (required for Referer-gated
+                        HLS streams).  The client (ExoPlayer / AVPlayer) handles
+                        HLS natively — there is no single file to download.
         """
-        from urllib.parse import urlencode, quote
+        from urllib.parse import urlencode
+        base_url = str(request.base_url).rstrip("/")
+
         if lnk.type == "m3u8":
-            # HLS playlists: no single file to download, return raw URL
-            return lnk.url
-        params: dict[str, str] = {"url": lnk.url}
+            # Proxy the HLS playlist so segment requests include required headers
+            params: dict[str, str] = {"url": lnk.url}
+            if lnk.headers.get("Referer"):
+                params["referer"] = lnk.headers["Referer"]
+            if lnk.headers.get("Origin"):
+                params["origin"] = lnk.headers["Origin"]
+            return f"{base_url}/api/v1/proxy?{urlencode(params)}"
+
+        # mp4 / mkv — force download via proxy
+        params = {"url": lnk.url}
         if lnk.headers.get("Referer"):
             params["referer"] = lnk.headers["Referer"]
         if lnk.headers.get("Origin"):
@@ -322,7 +355,6 @@ async def post_download(
         quality = lnk.quality or "video"
         ext = "mkv" if lnk.type == "mkv" else "mp4"
         params["filename"] = f"{req.title} {quality}.{ext}"
-        base_url = str(request.base_url).rstrip("/")
         return f"{base_url}/api/v1/download-proxy?{urlencode(params)}"
 
     links_out = [
@@ -656,22 +688,31 @@ async def proxy_stream(
 
 @router.get("/download-proxy")
 async def download_proxy(
+    request:  Request,
     url:      str           = Query(..., description="Direct media URL to proxy as a download"),
     filename: Optional[str] = Query(None, description="Override filename for Content-Disposition"),
     referer:  Optional[str] = Query(None),
     origin:   Optional[str] = Query(None),
 ):
     """
-    Proxy a direct mp4/mkv/m3u8 URL and force browser file download via
-    Content-Disposition: attachment.  This is the missing piece for the
-    /api/v1/download endpoint — stream URLs that require Referer/Origin
-    headers can't be downloaded directly by a browser or mobile app, but
-    they can be tunnelled through here.
+    Proxy a direct mp4/mkv URL and force browser/app file download via
+    Content-Disposition: attachment.
+
+    Key behaviours:
+      - Streams the response body in chunks — never loads the whole file into
+        memory, so it works correctly for multi-GB files.
+      - Forwards the client's Range header to the upstream CDN, enabling
+        resumable downloads and seeking in video players.
+      - Injects required Referer/Origin headers that the client can't send
+        directly (CORS / hotlink protection).
+      - Returns 404/502 if the upstream URL is dead so the client knows
+        immediately rather than getting a silent empty file.
 
     Usage: GET /api/v1/download-proxy?url=<encoded_url>&filename=movie.mp4
     """
     from urllib.parse import unquote
     import posixpath
+    import httpx
 
     blocked = guard_url(url)
     if blocked:
@@ -691,37 +732,67 @@ async def download_proxy(
     if referer: req_headers["Referer"] = referer
     if origin:  req_headers["Origin"]  = origin
 
+    # Forward Range header from client so resumable downloads / partial content work
+    client_range = request.headers.get("Range")
+    if client_range:
+        req_headers["Range"] = client_range
+
     from app.utils.http import get_client
     client = await get_client()
+
+    # Use stream=True so we never buffer the whole file
     try:
-        upstream = await client.get(url, headers=req_headers, follow_redirects=True, timeout=30)
+        upstream_request = client.build_request(
+            "GET", url, headers=req_headers
+        )
+        upstream = await client.send(upstream_request, follow_redirects=True, stream=True)
     except Exception as exc:
-        raise HTTPException(status_code=502, detail=str(exc))
+        raise HTTPException(status_code=502, detail=f"Upstream connection failed: {exc}")
 
     if upstream.status_code >= 400:
-        raise HTTPException(status_code=upstream.status_code, detail="Upstream returned error")
+        await upstream.aclose()
+        raise HTTPException(
+            status_code=upstream.status_code,
+            detail=f"Upstream returned {upstream.status_code} — URL may be dead or expired",
+        )
 
     content_type = upstream.headers.get("content-type", "application/octet-stream")
 
     # Derive a sensible filename
     if not filename:
-        path = posixpath.basename(str(upstream.url).split("?")[0])
+        final_url = str(upstream.url)
+        path = posixpath.basename(final_url.split("?")[0])
         filename = unquote(path) if path else "download.mp4"
 
-    # Sanitise filename
+    # Sanitise filename (no quotes or newlines in Content-Disposition)
     filename = filename.replace('"', "'").replace("\n", "").replace("\r", "")
 
-    resp_headers = {
+    resp_headers: dict[str, str] = {
         "Content-Disposition": f'attachment; filename="{filename}"',
         "Access-Control-Allow-Origin": "*",
         "Cache-Control": "public, max-age=3600",
     }
-    cl = upstream.headers.get("content-length")
-    if cl:
-        resp_headers["Content-Length"] = cl
 
-    return Response(
-        content=upstream.content,
+    # Pass through Content-Length and Content-Range so clients can show progress
+    # and resume interrupted downloads
+    for hdr in ("content-length", "content-range", "accept-ranges"):
+        val = upstream.headers.get(hdr)
+        if val:
+            resp_headers[hdr.title()] = val
+
+    # Determine correct HTTP status: 206 Partial Content when upstream honours Range
+    status_code = upstream.status_code  # typically 200 or 206
+
+    async def _stream_body():
+        try:
+            async for chunk in upstream.aiter_bytes(chunk_size=64 * 1024):
+                yield chunk
+        finally:
+            await upstream.aclose()
+
+    return StreamingResponse(
+        _stream_body(),
+        status_code=status_code,
         media_type=content_type,
         headers=resp_headers,
     )

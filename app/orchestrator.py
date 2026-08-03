@@ -414,31 +414,87 @@ def _normalise_quality(raw: str | None) -> str:
 async def _resolve_direct_url(url: str, headers: dict) -> str | None:
     """
     Follow redirects on a URL to see if it lands on a direct .mp4/.mkv file.
-    Returns the final URL if it's a direct media file, else None.
-    This is what makes mp4 links actually downloadable — many providers
-    return a redirect chain that terminates at a CDN mp4.
+    Returns the final resolved URL if it's a direct media file, else None.
+
+    Strategy:
+      1. Try HEAD first (cheap, no body download).
+      2. If the server rejects HEAD (405, 403, or connection error) fall back
+         to a range-GET for 0 bytes — still gets the final URL + content-type
+         without downloading the file body.
+      3. Any 4xx/5xx on the final hop → discard the link (it's dead).
     """
-    try:
-        from app.utils.http import get_client
-        client = await get_client()
-        hdrs = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137 Safari/537.36",
-            **headers,
-        }
-        # Use HEAD to avoid downloading the whole file body
-        r = await client.head(url, headers=hdrs, timeout=8, follow_redirects=True)
-        final_url = str(r.url)
-        content_type = r.headers.get("content-type", "")
-        # Accept if URL or content-type signals a direct video file
-        is_direct = (
+    from app.utils.http import get_client
+    client = await get_client()
+    hdrs = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137 Safari/537.36",
+        **headers,
+    }
+
+    def _is_direct_media(final_url: str, content_type: str) -> bool:
+        return (
             any(ext in final_url.lower() for ext in (".mp4", ".mkv", ".webm"))
             or any(ct in content_type for ct in ("video/", "application/octet-stream"))
         )
-        if is_direct:
+
+    # ── Attempt 1: HEAD ───────────────────────────────────────────────────────
+    try:
+        r = await client.head(url, headers=hdrs, timeout=8, follow_redirects=True)
+        final_url = str(r.url)
+        # Treat any 4xx/5xx as a dead link
+        if r.status_code >= 400:
+            return None
+        content_type = r.headers.get("content-type", "")
+        if _is_direct_media(final_url, content_type):
+            return final_url
+        # HEAD returned 2xx but content-type was ambiguous — fall through to GET
+        if r.status_code not in (405, 403):
+            # Server answered and it's not a media file at all — discard
+            return None
+    except Exception:
+        pass  # connection error or timeout — try GET fallback
+
+    # ── Attempt 2: Range-GET for 0 bytes (avoids body, gets redirect + type) ──
+    try:
+        range_hdrs = {**hdrs, "Range": "bytes=0-0"}
+        r = await client.get(url, headers=range_hdrs, timeout=8, follow_redirects=True)
+        final_url = str(r.url)
+        if r.status_code >= 400:
+            return None
+        content_type = r.headers.get("content-type", "")
+        if _is_direct_media(final_url, content_type):
             return final_url
     except Exception:
         pass
+
     return None
+
+
+async def _validate_m3u8_variants(
+    links: list[DownloadLink],
+    headers: dict,
+) -> list[DownloadLink]:
+    """
+    HEAD-check each m3u8 variant URL concurrently and discard any that return
+    4xx/5xx or fail to connect.  This prevents dead quality entries (e.g. a
+    provider exposes 1080p/720p/480p but only 720p actually exists) from
+    reaching the client.
+    """
+    from app.utils.http import get_client
+    client = await get_client()
+
+    async def _check(lnk: DownloadLink) -> DownloadLink | None:
+        try:
+            r = await client.head(
+                lnk.url, headers=headers, timeout=5, follow_redirects=True
+            )
+            if r.status_code < 400:
+                return lnk
+        except Exception:
+            pass
+        return None
+
+    results = await asyncio.gather(*[_check(lnk) for lnk in links], return_exceptions=True)
+    return [r for r in results if r and not isinstance(r, Exception)]
 
 
 async def _fetch_m3u8_resolutions(
@@ -526,15 +582,32 @@ async def _fetch_m3u8_resolutions(
             i += 1
 
         if results:
-            # Sort by resolution descending
-            order = {q: i for i, q in enumerate(_RESOLUTION_ORDER)}
-            results.sort(key=lambda x: order.get(x.quality or "", 99))
-            return results
+            # Validate that each variant URL actually responds before returning
+            # it — avoids passing dead quality URLs to the client.
+            results = await _validate_m3u8_variants(results, hdrs)
+            if results:
+                # Sort by resolution descending
+                order = {q: i for i, q in enumerate(_RESOLUTION_ORDER)}
+                results.sort(key=lambda x: order.get(x.quality or "", 99))
+                return results
 
     except Exception:
         pass
 
-    # Fallback: return the master URL — preserve known quality label if available
+    # Fallback: validate the master URL itself before returning it
+    try:
+        from app.utils.http import get_client
+        client = await get_client()
+        _hdrs = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/137 Safari/537.36",
+            **headers,
+        }
+        r = await client.head(url, headers=_hdrs, timeout=6, follow_redirects=True)
+        if r.status_code >= 400:
+            return []   # master URL is dead — don't return it
+    except Exception:
+        return []       # can't reach it at all — skip
+
     return [DownloadLink(
         provider=provider,
         provider_id=provider_id,
@@ -638,18 +711,30 @@ async def run_download_providers(
     # Many providers return a bounce URL that only resolves to a direct mp4
     # after following 1–3 redirects. Without this step the client gets a
     # redirect URL that requires Referer/cookies it doesn't have.
-    async def resolve_mp4_link(lnk: DownloadLink) -> None:
+    #
+    # If _resolve_direct_url returns None the URL is dead or not a direct
+    # media file — we mark it for removal rather than passing a broken link
+    # to the client.
+    _dead_mp4: set[int] = set()
+
+    async def resolve_mp4_link(idx: int, lnk: DownloadLink) -> None:
         if lnk.type in ("mp4", "mkv") and lnk.url:
             resolved = await _resolve_direct_url(lnk.url, lnk.headers)
-            if resolved and resolved != lnk.url:
+            if resolved is None:
+                # URL is dead / not a downloadable media file
+                _dead_mp4.add(idx)
+            elif resolved != lnk.url:
                 lnk.url = resolved
                 # Clear headers that were specific to the redirect chain
                 lnk.headers = {}
 
     await asyncio.gather(
-        *[resolve_mp4_link(lnk) for lnk in mp4_links],
+        *[resolve_mp4_link(i, lnk) for i, lnk in enumerate(mp4_links)],
         return_exceptions=True,
     )
+
+    # Drop dead mp4 links
+    mp4_links = [lnk for i, lnk in enumerate(mp4_links) if i not in _dead_mp4]
 
     # Combine: direct mp4/mkv first (immediately downloadable), then m3u8
     # m3u8 links are kept as fallback for clients that can handle HLS
