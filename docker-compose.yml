@@ -27,6 +27,14 @@ services:
     networks:
       - reelz
 
+  # ── Optional Redis (uncomment + set REDIS_URL=redis://redis:6379 in .env) ───
+  # redis:
+  #   image: redis:7-alpine
+  #   container_name: reelz-redis
+  #   restart: unless-stopped
+  #   networks:
+  #     - reelz
+
 networks:
   reelz:
     driver: bridge
