@@ -73,10 +73,25 @@ class Settings(BaseSettings):
     torrent_dir: str = "/tmp/reelz-torrents"
     webtorrent_port: int = 9999
 
+    # ── App authentication ─────────────────────────────────────────────────────
+    # Shared secret sent by the Android app as X-Reelz-Token header.
+    # Set in .env / Render environment variables. Rotate without an app update
+    # by pushing a new value to config.json + this env var simultaneously.
+    app_secret_token: str = ""
+
     # ── Circuit breaker ────────────────────────────────────────────────────────
-    circuit_breaker_fail_threshold: int = 4
-    circuit_breaker_cooldown_s: int = 600
+    # 2 failures before tripping (was 4) — faster failure detection when a
+    # provider is dead, reducing tail latency for users.
+    # 300s cooldown (was 600s) — dead providers are retried sooner.
+    circuit_breaker_fail_threshold: int = 2
+    circuit_breaker_cooldown_s: int = 300
     provider_stats_file: str = "./provider-stats.json"
+
+    # ── Payments / Paystack ────────────────────────────────────────────────────
+    # Secret key from Paystack dashboard → API Keys & Webhooks.
+    # Used to validate HMAC-SHA512 webhook signatures.
+    # Never expose this in client-side code or config.json.
+    paystack_secret_key: str = ""
 
     # ── Misc ───────────────────────────────────────────────────────────────────
     debug_token: str = ""

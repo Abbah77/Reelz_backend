@@ -1,7 +1,9 @@
 """
 api/downloads.py — POST /api/v1/download + GET /api/v1/download-proxy
 
-Routes: tiny. No business logic.
+Rate-limited to 10 requests/minute per client IP (same as streams).
+Auth enforced by verify_token middleware in main.py.
+Routes are intentionally thin — all business logic lives in managers/download.py.
 """
 from __future__ import annotations
 
@@ -10,6 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
+from app.main import limiter
 from app.managers.download import get_downloads
 from app.schemas.request import DownloadRequest
 from app.utils.ssrf import guard_url, guard_resolved_url
@@ -18,9 +21,10 @@ router = APIRouter(prefix="/api/v1")
 
 
 @router.post("/download")
+@limiter.limit("10/minute")
 async def post_download(
+    request: Request,          # Required by slowapi for rate-limit key extraction
     req: DownloadRequest,
-    request: Request,
     fresh: int = Query(0),
     warp: Optional[str] = Query(None),
 ):

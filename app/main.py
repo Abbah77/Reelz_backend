@@ -8,6 +8,12 @@ Performance stack:
   - lxml parser     → 3-5× faster than html.parser
   - uvicorn[std]    → uvloop + httptools (C-level event loop + HTTP parser)
   - Brotli          → smaller payloads than gzip
+
+Security middleware (ordered — outermost runs first on request):
+  1. verify_token   — rejects unauthenticated callers with 403
+  2. add_timing     — adds X-Response-Time-Ms header on every response
+  3. CORS           — allows configured origins only
+  4. slowapi         — rate-limits /streams and /downloads by client IP
 """
 from __future__ import annotations
 
@@ -18,6 +24,9 @@ import orjson
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.errors import RateLimitExceeded
+from slowapi.util import get_remote_address
 
 from app.config import get_settings
 from app.providers.stream.registry import init_stream_providers
@@ -27,8 +36,22 @@ from app.api.streams import router as streams_router
 from app.api.downloads import router as downloads_router
 from app.api.subtitles import router as subtitles_router
 from app.api.health import router as health_router
+from app.api.payments import router as payments_router
 
 _settings = get_settings()
+
+# ── Rate limiter (slowapi) ─────────────────────────────────────────────────────
+# Key by real client IP. Works behind Render's proxy because slowapi reads
+# X-Forwarded-For when the ASGI scope is set correctly.
+limiter = Limiter(key_func=get_remote_address)
+
+# Paths that are always publicly accessible — no token, no rate limit.
+# Paystack webhook is authenticated by HMAC signature, not by our app token.
+_OPEN_PATHS = frozenset({
+    "/", "/api/v1/health", "/api/v1/health/providers",
+    "/docs", "/redoc", "/openapi.json",
+    "/api/v1/payments/webhook",
+})
 
 
 # ── orjson response ────────────────────────────────────────────────────────────
@@ -75,6 +98,10 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+# Attach limiter to app state so slowapi can find it via the decorator
+app.state.limiter = limiter
+app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
+
 # ── CORS ───────────────────────────────────────────────────────────────────────
 
 _origins = (
@@ -90,6 +117,29 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+# ── Auth middleware — X-Reelz-Token ───────────────────────────────────────────
+# Runs on every request. Open paths (health, docs, root) bypass the check.
+# If app_secret_token is blank (not configured), auth is effectively disabled
+# so the app keeps working during the deployment transition period.
+
+@app.middleware("http")
+async def verify_token(request: Request, call_next):
+    if request.url.path in _OPEN_PATHS:
+        return await call_next(request)
+
+    secret = _settings.app_secret_token
+    if secret:
+        token = request.headers.get("X-Reelz-Token", "")
+        if token != secret:
+            return Response(
+                content=orjson.dumps({"detail": "Forbidden"}),
+                status_code=403,
+                media_type="application/json",
+            )
+
+    return await call_next(request)
 
 
 # ── Timing middleware ──────────────────────────────────────────────────────────
@@ -108,6 +158,7 @@ app.include_router(health_router)
 app.include_router(streams_router)
 app.include_router(downloads_router)
 app.include_router(subtitles_router)
+app.include_router(payments_router)
 
 
 @app.get("/", include_in_schema=False)
