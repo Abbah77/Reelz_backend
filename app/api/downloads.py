@@ -12,7 +12,7 @@ from typing import Optional
 from fastapi import APIRouter, HTTPException, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
-from app.main import limiter
+from app.limiter import limiter
 from app.managers.download import get_downloads
 from app.schemas.request import DownloadRequest
 from app.utils.ssrf import guard_url, guard_resolved_url

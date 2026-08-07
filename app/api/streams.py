@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Optional
 
 from fastapi import APIRouter, Query, Request
-from app.main import limiter
+from app.limiter import limiter
 from app.managers.stream import get_streams
 from app.schemas.request import StreamRequest
 
