@@ -2,9 +2,10 @@
 api/search.py — Search route.
 
 GET /api/v1/search?q=<query>[&type=movie|tv][&cursor=...][&limit=20]
+
+GUEST-accessible: no login required.
 """
 from __future__ import annotations
-
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -19,7 +20,7 @@ async def search(
     type: Optional[str]   = Query(None, description="movie | tv | null = both"),
     cursor: Optional[str] = Query(None),
     limit: int            = Query(20, ge=1, le=50),
-    _: None = Depends(verify),
+    user_id: Optional[str] = Depends(verify),
 ):
     if type and type not in ("movie", "tv"):
         raise HTTPException(status_code=400, detail="type must be 'movie' or 'tv'")

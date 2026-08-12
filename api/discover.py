@@ -3,6 +3,8 @@ api/discover.py — Explore/Discover + Genre list routes.
 
 GET /api/v1/discover — paginated media discovery with filters
 GET /api/v1/genres   — genre list for filter UI
+
+GUEST-accessible: no login required.
 """
 from __future__ import annotations
 
@@ -31,16 +33,16 @@ def _encode_cursor(page: int) -> str:
 
 @router.get("/discover")
 async def discover(
-    type: str           = Query("movie", description="movie | tv"),
-    genre: Optional[str]    = Query(None, description="TMDB genre ID"),
-    language: Optional[str] = Query(None, description="ISO 639-1 language code"),
-    sort: str           = Query("popularity", description="popularity | rating | newest | oldest"),
-    year_from: Optional[int]   = Query(None),
-    year_to:   Optional[int]   = Query(None),
+    type: str            = Query("movie", description="movie | tv"),
+    genre: Optional[str]     = Query(None, description="TMDB genre ID"),
+    language: Optional[str]  = Query(None, description="ISO 639-1 language code"),
+    sort: str            = Query("popularity", description="popularity | rating | newest | oldest"),
+    year_from: Optional[int]    = Query(None),
+    year_to:   Optional[int]    = Query(None),
     rating_min: Optional[float] = Query(None, ge=0, le=10),
-    cursor: Optional[str]  = Query(None),
-    limit: int           = Query(20, ge=1, le=50),
-    _: None = Depends(verify),
+    cursor: Optional[str]   = Query(None),
+    limit: int            = Query(20, ge=1, le=50),
+    user_id: Optional[str] = Depends(verify),
 ):
     from CATALOG.tmdb import discover as tmdb_discover, normalise_card
 
@@ -67,7 +69,7 @@ async def discover(
 @router.get("/genres")
 async def get_genres(
     type: str = Query("movie", description="movie | tv"),
-    _: None = Depends(verify),
+    user_id: Optional[str] = Depends(verify),
 ):
     from CATALOG.tmdb import get_genres
     genres = await get_genres(type)

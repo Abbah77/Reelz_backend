@@ -6,7 +6,9 @@ Accepts the StreamRequestBody shape the Android app sends:
 
 where id = "movie:550" or "tv:1396"
 
-Translates to ENGINE's StreamRequest and returns StreamResponseDto shape.
+LOGIN REQUIRED (FREE_USER or PREMIUM_USER).
+Guests are redirected to sign in by the app when they tap Play.
+Premium users get access to higher-quality sources (future: filter by tier).
 """
 from __future__ import annotations
 
@@ -15,7 +17,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from api.auth import verify_engine as verify
+from api.auth import verify_engine
 
 router = APIRouter(prefix="/api/v1", tags=["Stream"])
 
@@ -29,7 +31,6 @@ class StreamRequestBody(BaseModel):
 
 
 def _parse_id(media_id: str) -> tuple[Optional[str], Optional[int]]:
-    """Extract imdb_id (None) and tmdb_id from our ID format."""
     parts = media_id.split(":", 1)
     if len(parts) == 2:
         try:
@@ -40,7 +41,6 @@ def _parse_id(media_id: str) -> tuple[Optional[str], Optional[int]]:
 
 
 class _EngineRequest:
-    """Adapter: StreamRequestBody → ENGINE StreamRequest shape."""
     def __init__(self, body: StreamRequestBody, tmdb_id: int):
         self.tmdb_id = tmdb_id
         self.type    = body.type
@@ -56,7 +56,7 @@ async def resolve_stream(
     req: StreamRequestBody,
     fresh: int = Query(0, description="1 = skip cache"),
     warp:  str = Query("off"),
-    _: None = Depends(verify),
+    user_id: str = Depends(verify_engine),   # LOGIN REQUIRED
 ):
     _, tmdb_id = _parse_id(req.id)
     if tmdb_id is None:
@@ -68,14 +68,12 @@ async def resolve_stream(
     from ENGINE.manager.stream import get_streams
     result = await get_streams(engine_req, fresh=bool(fresh), warp_mode=warp)
 
-    # Translate ENGINE response → StreamResponseDto shape expected by the app
     streams = result.get("streams", [])
     best    = result.get("stream")
 
     if not best and streams:
         best = streams[0]
 
-    # Build quality tracks from all streams
     qualities = [
         {
             "label":      s.get("quality") or "Auto",
@@ -88,16 +86,15 @@ async def resolve_stream(
     ]
 
     return {
-        "ok":         result.get("ok", False),
-        "stream_url": best["url"] if best else "",
-        "is_hls":     (best["type"] == "m3u8") if best else True,
-        "quality":    best.get("quality") or "Auto" if best else "Auto",
-        "headers":    best.get("headers") or {} if best else {},
+        "ok":          result.get("ok", False),
+        "stream_url":  best["url"] if best else "",
+        "is_hls":      (best["type"] == "m3u8") if best else True,
+        "quality":     best.get("quality") or "Auto" if best else "Auto",
+        "headers":     best.get("headers") or {} if best else {},
         "source_name": best.get("provider") or "" if best else "",
-        "qualities":  qualities,
-        "subtitles":  [],
+        "qualities":   qualities,
+        "subtitles":   [],
         "cache_ttl_ms": 240_000,
-        # Pass-through metadata useful for debugging
-        "_cached":    result.get("cached", False),
-        "_took_ms":   result.get("took_ms", 0),
+        "_cached":     result.get("cached", False),
+        "_took_ms":    result.get("took_ms", 0),
     }

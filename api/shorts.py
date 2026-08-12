@@ -4,7 +4,8 @@ api/shorts.py — GET /api/v1/shorts
 Cursor-paginated shorts feed matching ShortsResponseDto:
     { items, has_more, next_cursor }
 
-Cursor encodes a page number for the ENGINE shorts provider.
+GUEST-accessible: no login required. Shorts are a core browsing feature.
+Stream resolution inside the ENGINE still requires login (via /stream).
 """
 from __future__ import annotations
 
@@ -13,12 +14,9 @@ import json
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from api.auth import verify_engine as verify
+from api.auth import verify
 
 router = APIRouter(prefix="/api/v1", tags=["Shorts"])
-
-# Shorts are fetched by TMDB trending movies/tv from the ENGINE shorts provider.
-# The ENGINE manager returns a flat list; we paginate it here via cursor.
 
 _DEFAULT_TMDB_ID = 0      # 0 = "all" — handled by provider
 
@@ -41,7 +39,7 @@ async def get_shorts(
     cursor: Optional[str] = Query(None),
     limit:  int = Query(10, ge=1, le=50),
     fresh:  int = Query(0),
-    _: None = Depends(verify),
+    user_id: Optional[str] = Depends(verify),
 ):
     page = _decode_page(cursor)
 
@@ -55,10 +53,9 @@ async def get_shorts(
 
     raw_shorts = result.get("shorts", [])
 
-    # Map ENGINE Short → ShortVideoDto shape
     items = [
         {
-            "id":           s.get("url", ""),  # URL is the stable ID for shorts
+            "id":           s.get("url", ""),
             "title":        s.get("title", ""),
             "author":       s.get("provider", ""),
             "hls_url":      s.get("url", "") if s.get("url", "").endswith(".m3u8") else "",
