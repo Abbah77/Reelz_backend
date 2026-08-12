@@ -1,10 +1,36 @@
+# Reelz Backend — Python dependencies
+# Install: pip install -r requirements.txt
+
+# ── Web framework ─────────────────────────────────────────────────────────────
 fastapi>=0.115
 uvicorn[standard]>=0.30
+
+# ── HTTP client ───────────────────────────────────────────────────────────────
 httpx[http2]>=0.27
+
+# ── Serialization ─────────────────────────────────────────────────────────────
 orjson>=3.10
 pydantic>=2.7
 pydantic-settings>=2.3
+
+# ── HTML parsing (ENGINE providers) ──────────────────────────────────────────
 beautifulsoup4>=4.12
 lxml>=5.0
+
+# ── Cache ─────────────────────────────────────────────────────────────────────
 redis[asyncio]>=5.0
+
+# ── Database ──────────────────────────────────────────────────────────────────
+sqlalchemy[asyncio]>=2.0
+aiosqlite>=0.20                    # SQLite async driver (dev + small prod)
+asyncpg>=0.29                      # Postgres async driver (production)
+
+# ── Auth ──────────────────────────────────────────────────────────────────────
+PyJWT>=2.8                         # JWT sign/verify
+
+# ── Rate limiting ─────────────────────────────────────────────────────────────
 slowapi>=0.1.9
+
+# ── Optional: Google token verification (offline, no network round-trip) ──────
+# google-auth>=2.29
+# google-auth-httplib2>=0.2

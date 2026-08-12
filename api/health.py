@@ -1,5 +1,5 @@
 """
-api/health.py — Health check. No auth required.
+api/health.py — Health check routes. No auth required.
 """
 from __future__ import annotations
 

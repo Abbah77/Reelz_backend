@@ -1,7 +1,7 @@
 """
 config.py — All settings in one place. Nothing reads os.environ directly.
 
-Every folder (api, ENGINE, USERS) imports from here.
+Every folder (api, ENGINE, CATALOG, USERS) imports from here.
 Change a value here — it changes everywhere.
 """
 from __future__ import annotations
@@ -31,11 +31,20 @@ class Settings(BaseSettings):
     # ── TMDB ─────────────────────────────────────────────────────────────────
     tmdb_api_key: str = ""
     tmdb_base_url: str = "https://api.themoviedb.org/3"
+    tmdb_image_base: str = "https://image.tmdb.org/t/p"
+    tmdb_poster_size: str = "w500"
+    tmdb_backdrop_size: str = "w1280"
+    tmdb_still_size: str = "w300"
+    tmdb_profile_size: str = "w185"
+
+    # ── Feed ──────────────────────────────────────────────────────────────────
+    feed_cache_ttl_seconds: int = 3600          # 1 hour
+    feed_section_limit: int = 20
 
     # ── Cache ─────────────────────────────────────────────────────────────────
-    redis_url: str = ""                 # empty = memory cache
-    cache_ttl_seconds: int = 480        # 8 min stream cache
-    cache_backend: str = "memory"       # memory | redis | cloudflare
+    redis_url: str = ""                         # empty = memory cache
+    cache_ttl_seconds: int = 480                # 8 min stream cache
+    cache_backend: str = "memory"               # memory | redis | cloudflare
 
     # ── Circuit breaker ───────────────────────────────────────────────────────
     cb_fail_threshold: int = 2
@@ -71,6 +80,53 @@ class Settings(BaseSettings):
     anizone_base_url: str = "https://anizone.to"
     wyzie_key: str = ""
     consumet_url: str = ""
+
+    # ── JWT (issued by this backend) ──────────────────────────────────────────
+    jwt_secret: str = "change-me-in-production"
+    jwt_algorithm: str = "HS256"
+    jwt_access_ttl_hours: int = 720     # 30 days
+
+    # ── Google OAuth ──────────────────────────────────────────────────────────
+    google_client_id: str = ""          # Web client ID for ID-token verification
+
+    # ── Database ──────────────────────────────────────────────────────────────
+    database_url: str = "sqlite+aiosqlite:///./reelz.db"
+    # Postgres example: postgresql+asyncpg://user:pass@localhost/reelz
+
+    # ── Paystack ──────────────────────────────────────────────────────────────
+    paystack_secret_key: str = ""
+    paystack_public_key: str = ""
+    paystack_webhook_secret: str = ""
+    paystack_base_url: str = "https://api.paystack.co"
+
+    # ── App config (returned by GET /config) ───────────────────────────────────
+    app_version: int = 1
+    min_app_version: int = 1
+    latest_app_version: int = 1
+    latest_apk_url: str = ""
+
+    # Feature flags
+    shorts_enabled: bool = True
+    downloads_enabled: bool = True
+    force_maintenance: bool = False
+    maintenance_message: str = ""
+
+    # Premium pricing (in kobo / minor currency unit)
+    premium_enabled: bool = False
+    premium_monthly_price: int = 0
+    paystack_monthly_url: str = ""
+    paystack_yearly_url: str = ""
+
+    # Ads config
+    ads_enabled: bool = False
+    applovin_sdk_key: str = ""
+    ads_mediation_provider: str = "max"
+    ads_banner_id: str = ""
+    ads_interstitial_id: str = ""
+    ads_rewarded_id: str = ""
+    ads_native_id: str = ""
+    ads_app_open_id: str = ""
+    ads_vast_tag_url: str = ""
 
 
 @lru_cache

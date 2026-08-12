@@ -1,0 +1,47 @@
+version: "3.9"
+
+# ── Reelz local dev stack ──────────────────────────────────────────────────────
+# Starts: backend + Redis
+# Usage:
+#   docker-compose up --build
+#   API available at http://localhost:8000
+#   Docs at http://localhost:8000/docs (DEBUG=true only)
+
+services:
+  backend:
+    build: .
+    container_name: reelz-backend
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    volumes:
+      - .:/app                          # hot-reload in dev
+      - reelz-data:/app/data            # SQLite + provider stats
+    env_file:
+      - .env
+    environment:
+      - DATABASE_URL=sqlite+aiosqlite:////app/data/reelz.db
+      - PROVIDER_STATS_FILE=/app/data/provider-stats.json
+      - CACHE_BACKEND=redis
+      - REDIS_URL=redis://redis:6379
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+  redis:
+    image: redis:7-alpine
+    container_name: reelz-redis
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+    volumes:
+      - redis-data:/data
+
+volumes:
+  reelz-data:
+  redis-data:

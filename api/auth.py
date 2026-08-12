@@ -1,12 +1,12 @@
 """
-api/auth.py — Token verification plugin.
+api/auth.py — Static token verification for ENGINE endpoints.
 
-This is the gate security. Every request passes through here first.
-Add new security checks here. Remove them here. Nothing else changes.
+This is the gate security for all ENGINE routes (stream, download, subtitle, shorts).
+Completely separate from user JWTs (USERS/jwt.py).
 
 Usage:
     from api.auth import verify
-    # use as FastAPI dependency on any route
+    @router.post("", dependencies=[Depends(verify)])
 """
 from __future__ import annotations
 
@@ -21,13 +21,13 @@ async def verify(
     x_reelz_token: str = Header(default=""),
 ) -> None:
     """
-    FastAPI dependency — inject into any route to enforce auth.
+    FastAPI dependency — enforce the static app secret token.
     Returns None on success. Raises 403 on failure.
-    Add rate limiting, IP whitelisting, JWT — all here.
+    No token configured (empty APP_SECRET_TOKEN) → open dev mode.
     """
     secret = _s.app_secret_token
     if not secret:
-        return  # no token configured = open (dev mode)
+        return  # dev mode — no auth required
 
     if x_reelz_token != secret:
         raise HTTPException(status_code=403, detail="Forbidden")
