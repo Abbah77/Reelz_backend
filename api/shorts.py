@@ -13,7 +13,7 @@ import json
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
-from api.auth import verify
+from api.auth import verify_engine as verify
 
 router = APIRouter(prefix="/api/v1", tags=["Shorts"])
 

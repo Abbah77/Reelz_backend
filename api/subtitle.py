@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from api.auth import verify
+from api.auth import verify_engine as verify
 
 router = APIRouter(prefix="/api/v1", tags=["Subtitles"])
 
