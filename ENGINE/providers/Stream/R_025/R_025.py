@@ -1,21 +1,47 @@
 """
-ENGINE/providers/Stream/R-025/R_025.py — Moviesmod
+ENGINE/providers/Stream/R-025/R_025.py — Moviesmod (Indian content)
 
-Indian content
-
-Tools available — import what you need:
-    from ENGINE.tools.http import get_client, UA
-    from ENGINE.tools.warp import warp_proxy
-    from ENGINE.tools.flaresolverr import solve_cloudflare
-    from ENGINE.tools.anticaptcha import solve_recaptcha_v2
-    from ENGINE.tools.ip import get_residential_proxy
-    from ENGINE.tools.encdec import enc_dec_get
-    from ENGINE.tools.debrid import unrestrict_link
+/search/<imdbId> -> article -> detail page -> quality headings -> intermediate page
+-> maxbutton/episode link -> bypassHrefli -> stream.
+Requires imdb_id.
+Ported from Streamplay's MoviesModProvider.
 """
 from __future__ import annotations
 
+import re
+
 from ENGINE.providers.base import Provider, LinkData, Result, Stream
 from ENGINE.tools.http import get_client, UA
+from ENGINE.tools.domains import get_domain
+from ENGINE.tools.bypass import bypass_hrefli
+from ENGINE.tools.flaresolverr import solve_cloudflare
+
+
+async def _cf_get(url: str) -> str | None:
+    try:
+        client = await get_client()
+        r = await client.get(url, headers={"User-Agent": UA}, timeout=20)
+        if r.status_code < 400 and not re.search(r"just a moment", r.text, re.I):
+            return r.text
+    except Exception:
+        pass
+    html, _, _ = await solve_cloudflare(url)
+    return html
+
+
+async def _load_extractor(source: str) -> list[Stream]:
+    html = await _cf_get(source)
+    if not html:
+        return []
+    streams: list[Stream] = []
+    for m in re.finditer(r'(https?://[^"\'<>\s]+\.(?:m3u8|mp4)[^"\'<>\s]*)', html):
+        url = m.group(1)
+        streams.append(Stream(url=url, type="m3u8" if ".m3u8" in url else "mp4", server="R-025 Moviesmod"))
+    return streams
+
+
+def _pad2(n: int) -> str:
+    return f"0{n}" if n < 10 else str(n)
 
 
 class R025Provider(Provider):
@@ -25,10 +51,78 @@ class R025Provider(Provider):
     async def run(self, data: LinkData) -> Result:
         result = Result()
         try:
-            # ── TODO: implement Moviesmod scraping logic ────────────────────────
-            # Must append Stream objects to result.streams
-            # Stream fields: url (required), type, server, quality, headers
-            pass
+            api = await get_domain("moviesmod")
+            if not api or not data.imdb_id:
+                return result
+
+            season = data.season
+            episode = data.episode
+
+            search_url = (
+                f"{api}/search/{data.imdb_id}"
+                if season is None
+                else f"{api}/search/{data.imdb_id} {season}"
+            )
+            search_html = await _cf_get(search_url)
+            if not search_html:
+                return result
+
+            from bs4 import BeautifulSoup
+            ssoup = BeautifulSoup(search_html, "html.parser")
+            article_a = ssoup.select_one("#content_box article > a")
+            if not article_a:
+                return result
+            href = article_a.get("href") or ""
+
+            htag = "h4" if season is None else "h3"
+            atag = "Download" if season is None else "Episode"
+            stag = "" if season is None else rf"(S{_pad2(season)}|Season {season})"
+            heading_re = re.compile(rf"{stag}.*(480p|720p|1080p|2160p)", re.I)
+
+            detail_html = await _cf_get(href)
+            if not detail_html:
+                return result
+            dsoup = BeautifulSoup(detail_html, "html.parser")
+
+            for h_el in dsoup.select(f"div.thecontent {htag}"):
+                text = h_el.get_text()
+                if not heading_re.search(text) or re.search(r"moviesmod", text, re.I):
+                    continue
+                sib = h_el.find_next_sibling()
+                link = ""
+                if sib:
+                    for a in sib.select("a"):
+                        if atag in a.get_text():
+                            raw_href = a.get("href") or ""
+                            link = raw_href[raw_href.index("=") + 1:] if "=" in raw_href else raw_href
+                            break
+                if not link:
+                    continue
+
+                intermediate_html = await _cf_get(link)
+                if not intermediate_html:
+                    continue
+                isoup = BeautifulSoup(intermediate_html, "html.parser")
+
+                source: str | None = None
+                if season is None:
+                    a_el = isoup.select_one("p a.maxbutton")
+                    source = a_el.get("href") if a_el else None
+                else:
+                    ep_re = re.compile(rf"Episode {episode}", re.I)
+                    for a in isoup.select("h3 a"):
+                        if ep_re.search(a.get_text()):
+                            source = a.get("href")
+                            break
+
+                if not source:
+                    continue
+
+                bypassed = await bypass_hrefli(source)
+                if not bypassed:
+                    continue
+                for s in await _load_extractor(bypassed):
+                    result.streams.append(s)
         except Exception:
             pass
         return result

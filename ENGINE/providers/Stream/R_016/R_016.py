@@ -1,21 +1,61 @@
 """
-ENGINE/providers/Stream/R-016/R_016.py — AnimeNoSub
+ENGINE/providers/Stream/R-016/R_016.py — AnimeNoSub (anime only)
 
-anime only
+DooPlay WordPress site, plain HTTP.
+Flow:
+  1. /?s=<title>              -> /anime/<slug>/ cards
+  2. /anime/<slug>/           -> episode link matching /-episode-<N>/
+  3. Episode page             -> megaplay.buzz iframe -> /stream/getSources?id=<data-id>
+                                  -> { sources: { file }, tracks: [{file,.vtt,label}] }
+  DUB: swap /sub -> /dub in megaplay URL.
 
-Tools available — import what you need:
-    from ENGINE.tools.http import get_client, UA
-    from ENGINE.tools.warp import warp_proxy
-    from ENGINE.tools.flaresolverr import solve_cloudflare
-    from ENGINE.tools.anticaptcha import solve_recaptcha_v2
-    from ENGINE.tools.ip import get_residential_proxy
-    from ENGINE.tools.encdec import enc_dec_get
-    from ENGINE.tools.debrid import unrestrict_link
+Ported from Streamplay's AnimeNoSubProvider.
 """
 from __future__ import annotations
 
-from ENGINE.providers.base import Provider, LinkData, Result, Stream
+import asyncio
+import re
+
+from ENGINE.providers.base import Provider, LinkData, Result, Stream, Subtitle
 from ENGINE.tools.http import get_client, UA
+
+_BASE = "https://animenosub.to"
+
+
+def _norm(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
+
+
+def _season_score(title: str, want_season: int) -> int:
+    t = title.lower()
+    m = re.search(r"season\s*(\d+)", t)
+    if m:
+        return 3 if int(m.group(1)) == want_season else -2
+    return 1 if want_season == 1 else 0
+
+
+async def _resolve_megaplay(embed_url: str) -> tuple[str | None, list[Subtitle]]:
+    subs: list[Subtitle] = []
+    try:
+        client = await get_client()
+        page = (await client.get(embed_url, headers={"User-Agent": UA, "Referer": f"{_BASE}/"}, timeout=15)).text
+        id_m = re.search(r'data-id="(\d+)"', page)
+        if not id_m:
+            return None, subs
+        data_id = id_m.group(1)
+        from urllib.parse import urlparse
+        origin = f"{urlparse(embed_url).scheme}://{urlparse(embed_url).netloc}"
+        r = (await client.get(
+            f"{origin}/stream/getSources?id={data_id}",
+            headers={"User-Agent": UA, "Referer": f"{origin}/", "X-Requested-With": "XMLHttpRequest"},
+            timeout=15,
+        )).json()
+        for t in (r.get("tracks") or []):
+            if t.get("kind") == "captions" and t.get("file"):
+                subs.append(Subtitle(url=t["file"], language=t.get("label") or "Sub"))
+        return (r.get("sources") or {}).get("file"), subs
+    except Exception:
+        return None, subs
 
 
 class R016Provider(Provider):
@@ -24,14 +64,107 @@ class R016Provider(Provider):
 
     async def run(self, data: LinkData) -> Result:
         result = Result()
+        if not data.is_anime or not data.title:
+            return result
+
+        episode = 1 if data.type == "movie" else (data.episode or 1)
+        want_season = None if data.type == "movie" else (data.season or 1)
+
         try:
-            if not data.is_anime:
+            client = await get_client()
+            headers = {"User-Agent": UA}
+
+            queries = [data.title]
+            if data.org_title and data.org_title != data.title:
+                queries.append(data.org_title)
+
+            cards: list[dict] = []
+            for q in queries:
+                html = (await client.get(f"{_BASE}/?s={q}", headers=headers, timeout=15)).text
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(html, "html.parser")
+                seen: set[str] = set()
+                for a in soup.select('a[href*="/anime/"]'):
+                    url = (a.get("href") or "").split("#")[0]
+                    m = re.search(r"/anime/([^/]+)/?$", url)
+                    if not m:
+                        continue
+                    slug = m.group(1)
+                    if slug in seen:
+                        continue
+                    title = (a.get("title") or a.find("img", alt=True) and a.find("img")["alt"]  # type: ignore
+                             or a.get_text(strip=True) or slug)
+                    seen.add(slug)
+                    full_url = url if url.startswith("http") else f"{_BASE}{url}"
+                    cards.append({"slug": slug, "url": full_url, "title": str(title)})
+                if cards:
+                    break
+
+            if not cards:
                 return result
 
-            # ── TODO: implement AnimeNoSub scraping logic ────────────────────────
-            # Must append Stream objects to result.streams
-            # Stream fields: url (required), type, server, quality, headers
-            pass
+            want = _norm(data.title)
+            want_org = _norm(data.org_title or "")
+            extra_re = re.compile(r"\b(movie|film|arc|compilation|ova|special|recap)\b", re.I)
+
+            def _score(c: dict) -> float:
+                t = _norm(c["title"])
+                s = (4 if t == want or (want_org and t == want_org)
+                     else 1 if (want in t or t in want or (want_org and (want_org in t or t in want_org))) else 0)
+                if s > 0:
+                    if data.type != "movie" and extra_re.search(c["title"]):
+                        s -= 2
+                    if want_season:
+                        s += _season_score(c["title"], want_season)
+                return s
+
+            candidates = sorted([c for c in cards if _score(c) > 0], key=_score, reverse=True)
+            if not candidates:
+                return result
+
+            for pick in candidates[:5]:
+                anime_html = (await client.get(pick["url"], headers={"User-Agent": UA, "Referer": f"{_BASE}/"}, timeout=15)).text
+                from bs4 import BeautifulSoup
+                asoup = BeautifulSoup(anime_html, "html.parser")
+                ep_url = ""
+                for a in asoup.select('a[href*="-episode-"]'):
+                    href = (a.get("href") or "").split("#")[0]
+                    n_m = re.search(r"-episode-(\d+)", href)
+                    if n_m and int(n_m.group(1)) == episode and not ep_url:
+                        ep_url = href if href.startswith("http") else f"{_BASE}{href}"
+                if not ep_url:
+                    continue
+
+                ep_html = (await client.get(ep_url, headers={"User-Agent": UA, "Referer": pick["url"]}, timeout=15)).text
+                iframe_m = re.search(r'<iframe[^>]+(?:data-src|src)="([^"]+)"', ep_html, re.I)
+                if not iframe_m:
+                    continue
+                iframe_src = iframe_m.group(1)
+                embed = iframe_src if iframe_src.startswith("http") else f"https:{iframe_src.lstrip('/')}"
+
+                if re.search(r"megaplay\.", embed, re.I):
+                    sub_url = re.sub(r"/(sub|dub)/?$", "/sub", embed)
+                    dub_url = re.sub(r"/(sub|dub)/?$", "/dub", embed)
+                    variants = [{"url": sub_url, "dub": False}]
+                    if dub_url != sub_url:
+                        variants.append({"url": dub_url, "dub": True})
+
+                    async def resolve_variant(v: dict) -> None:
+                        m3u8, subs = await _resolve_megaplay(v["url"])
+                        for sub in subs:
+                            if not any(s.url == sub.url for s in result.subtitles):
+                                result.subtitles.append(sub)
+                        if m3u8 and not any(s.url == m3u8 for s in result.streams):
+                            result.streams.append(Stream(
+                                url=m3u8, type="m3u8",
+                                server=f"R-016 AnimeNoSub {'DUB' if v['dub'] else 'SUB'}",
+                                headers={"Referer": "https://megaplay.buzz/", "Origin": "https://megaplay.buzz"},
+                            ))
+
+                    await asyncio.gather(*[resolve_variant(v) for v in variants])
+
+                if result.streams:
+                    break
         except Exception:
             pass
         return result
