@@ -111,6 +111,12 @@ class Settings(BaseSettings):
     force_maintenance: bool = False
     maintenance_message: str = ""
 
+    # Download resolution caps (0 = no cap / unlimited)
+    # These are sent to the app via /config — the app NEVER decides caps itself.
+    # The backend also enforces the free cap server-side in api/download.py.
+    download_max_resolution_free: int = 0       # 0 = no cap (backend filters); set e.g. 720 to cap free users
+    download_max_resolution_premium: int = 0    # 0 = no cap
+
     # Premium pricing (in kobo / minor currency unit)
     premium_enabled: bool = False
     premium_monthly_price: int = 0

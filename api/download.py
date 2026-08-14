@@ -88,26 +88,38 @@ async def get_download_links(
 
     all_links = result.get("links", [])
 
-    # Premium users get all qualities; free users get standard quality only
-    # Convention: treat any link without explicit quality tag as "standard"
-    PREMIUM_QUALITIES = {"1080p", "4k", "2160p", "uhd", "fhd"}
-    if premium:
-        links = all_links
+    # Apply resolution cap from config.
+    # 0 means no cap. The cap is applied server-side so the app never decides —
+    # it just renders whatever links we send back.
+    max_res_free    = _s.download_max_resolution_free
+    max_res_premium = _s.download_max_resolution_premium
+    max_res = max_res_premium if premium else max_res_free
+
+    def _res_height(quality_str: str) -> int:
+        """Extract numeric height from a quality string like '1080p', '720p · Hindi'."""
+        import re
+        m = re.search(r"(\d{3,4})p", (quality_str or "").lower())
+        return int(m.group(1)) if m else 0
+
+    if max_res > 0:
+        filtered = [l for l in all_links if _res_height(l.get("quality") or "") <= max_res]
+        links = filtered or all_links[:1]   # always give at least one link
     else:
-        links = [
-            link for link in all_links
-            if (link.get("quality") or "").lower() not in PREMIUM_QUALITIES
-        ] or all_links[:1]   # always give at least one link
+        links = all_links
 
     return {
-        "ok":       result.get("ok", False),
-        "premium":  premium,
+        "ok":      result.get("ok", False),
+        "premium": premium,
+        # max_resolution tells the app what cap was applied (0 = no cap).
+        # The app uses this only for the lock badge UI — it never enforces caps itself.
+        "max_resolution": max_res,
         "links": [
             {
                 "label":      link.get("quality") or "Auto",
                 "url":        link.get("download_url") or link.get("url"),
-                "language":   "English",
-                "size_bytes":  0,
+                "language":   link.get("language") or "English",
+                # Pass real file size from provider if available
+                "size_bytes": link.get("size_bytes") or link.get("size") or 0,
             }
             for link in links
         ],

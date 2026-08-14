@@ -38,6 +38,11 @@ async def get_config():
             "paystack_monthly_url":  _s.paystack_monthly_url,
             "paystack_yearly_url":   _s.paystack_yearly_url,
         },
+        # Download resolution caps (0 = no cap).
+        # The app reads these and uses them purely for display (lock badge).
+        # The backend independently enforces caps in POST /api/v1/download.
+        "download_max_resolution_free":    _s.download_max_resolution_free,
+        "download_max_resolution_premium": _s.download_max_resolution_premium,
         "ads": {
             "enabled":               _s.ads_enabled,
             "applovin_sdk_key":      _s.applovin_sdk_key,
