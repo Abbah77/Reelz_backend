@@ -6,8 +6,8 @@ Accepts the StreamRequestBody shape the Android app sends:
 
 where id = "movie:550" or "tv:1396"
 
-LOGIN REQUIRED (FREE_USER or PREMIUM_USER).
-Guests are redirected to sign in by the app when they tap Play.
+GUEST-OK (no login required).
+All users — guests, free, and premium — can stream.
 Premium users get access to higher-quality sources (future: filter by tier).
 """
 from __future__ import annotations
@@ -17,7 +17,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from api.auth import verify_engine
+from api.auth import verify  # guest-ok: accepts JWT, legacy token, or no credentials
 
 router = APIRouter(prefix="/api/v1", tags=["Stream"])
 
@@ -56,7 +56,7 @@ async def resolve_stream(
     req: StreamRequestBody,
     fresh: int = Query(0, description="1 = skip cache"),
     warp:  str = Query("off"),
-    user_id: str = Depends(verify_engine),   # LOGIN REQUIRED
+    user_id: Optional[str] = Depends(verify),  # GUEST-OK: None for guests, str for logged-in users
 ):
     _, tmdb_id = _parse_id(req.id)
     if tmdb_id is None:

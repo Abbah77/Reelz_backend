@@ -11,7 +11,7 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from api.auth import verify_engine as verify
+from api.auth import verify  # guest-ok: guests can fetch subtitles without login
 
 router = APIRouter(prefix="/api/v1", tags=["Subtitles"])
 
@@ -48,7 +48,7 @@ class _EngineReq:
 async def get_subtitles(
     req: SubtitleRequestBody,
     fresh: int = Query(0),
-    _: None = Depends(verify),
+    user_id: Optional[str] = Depends(verify),  # GUEST-OK: None for guests, str for logged-in users
 ):
     tmdb_id = _parse_tmdb_id(req.id)
     if tmdb_id is None:
