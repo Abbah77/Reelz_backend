@@ -114,8 +114,6 @@ class Settings(BaseSettings):
     # Download resolution caps (0 = no cap / unlimited)
     # These are sent to the app via /config — the app NEVER decides caps itself.
     # The backend also enforces the free cap server-side in api/download.py.
-    download_max_resolution_free: int = 0       # 0 = no cap (backend filters); set e.g. 720 to cap free users
-    download_max_resolution_premium: int = 0    # 0 = no cap
 
     # Premium pricing (in kobo / minor currency unit)
     premium_enabled: bool = False
@@ -126,13 +124,10 @@ class Settings(BaseSettings):
     # Ads config
     ads_enabled: bool = False
     applovin_sdk_key: str = ""
-    ads_mediation_provider: str = "max"
     ads_banner_id: str = ""
     ads_interstitial_id: str = ""
     ads_rewarded_id: str = ""
     ads_native_id: str = ""
-    ads_app_open_id: str = ""
-    ads_vast_tag_url: str = ""
 
 
 @lru_cache

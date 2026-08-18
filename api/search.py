@@ -16,7 +16,7 @@ router = APIRouter(prefix="/api/v1", tags=["Search"])
 
 @router.get("/search")
 async def search(
-    q: str                = Query(..., min_length=1, description="Search query"),
+    q: str                = Query(..., min_length=2, description="Search query (min 2 chars)"),
     type: Optional[str]   = Query(None, description="movie | tv | null = both"),
     cursor: Optional[str] = Query(None),
     limit: int            = Query(20, ge=1, le=50),

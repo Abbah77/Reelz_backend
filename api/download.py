@@ -1,31 +1,30 @@
 """
-api/download.py — POST /api/v1/download + GET /api/v1/download/proxy
+api/download.py — POST /api/v1/download
 
-POST /api/v1/download       — resolve download links (LOGIN REQUIRED; config controls enablement)
-GET  /api/v1/download/proxy — byte-serve a proxied file as a download (LOGIN REQUIRED)
+Auth is OPTIONAL — same as Stream. Guests get full download access.
+premium: true on a link shows a lock badge in the app (upsell only).
+Backend enforces premium-only access server-side when the download starts.
 
-Per the access matrix:
-  GUEST        → downloads not available (401 from verify_engine)
-  FREE_USER    → limited downloads (config: downloads_enabled)
-  PREMIUM_USER → full downloads (config: downloads_enabled, premium unlocks all qualities)
+Request:  { id, type, season, episode }
+Response: { ok, links[], expires_at_ms }
 """
 from __future__ import annotations
 
+import time
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from api.auth import verify_engine
+from api.auth import verify  # GUEST-OK: auth optional
 
 router = APIRouter(prefix="/api/v1", tags=["Download"])
 
 
 class StreamRequestBody(BaseModel):
     """Same request body the app sends for both stream and download."""
-    id:      str = Field(..., description="'movie:<tmdb_id>' or 'tv:<tmdb_id>'")
+    id:      str = Field(..., description="Media ID")
     type:    str
-    title:   str
     season:  int = Field(0, ge=0)
     episode: int = Field(0, ge=0)
 
@@ -44,15 +43,17 @@ class _EngineReq:
     def __init__(self, body: StreamRequestBody, tmdb_id: int):
         self.tmdb_id = tmdb_id
         self.type    = body.type
-        self.title   = body.title
+        self.title   = ""
         self.imdb_id = None
         self.year    = None
         self.season  = body.season or None
         self.episode = body.episode or None
 
 
-async def _is_premium(user_id: str) -> bool:
+async def _is_premium(user_id: Optional[str]) -> bool:
     """Check if the authenticated user has an active premium subscription."""
+    if not user_id:
+        return False
     from USERS.db import SessionLocal
     from USERS.models import User
     from sqlalchemy import select
@@ -65,9 +66,8 @@ async def _is_premium(user_id: str) -> bool:
 @router.post("/download")
 async def get_download_links(
     req: StreamRequestBody,
-    request: Request,
     fresh: int = Query(0),
-    user_id: str = Depends(verify_engine),   # LOGIN REQUIRED
+    user_id: Optional[str] = Depends(verify),   # GUEST-OK: None for guests
 ):
     from config import get_settings
     from fastapi import HTTPException
@@ -80,59 +80,40 @@ async def get_download_links(
     if tmdb_id is None:
         raise HTTPException(status_code=400, detail="Invalid id format. Use 'movie:<tmdb_id>' or 'tv:<tmdb_id>'")
 
-    premium = await _is_premium(user_id)
+    is_premium = await _is_premium(user_id)
 
     engine_req = _EngineReq(req, tmdb_id)
     from ENGINE.manager.download import get_downloads
-    result = await get_downloads(engine_req, base_url=str(request.base_url), fresh=bool(fresh))
+    result = await get_downloads(engine_req, base_url="", fresh=bool(fresh))
 
     all_links = result.get("links", [])
 
-    # Apply resolution cap from config.
-    # 0 means no cap. The cap is applied server-side so the app never decides —
-    # it just renders whatever links we send back.
-    max_res_free    = _s.download_max_resolution_free
-    max_res_premium = _s.download_max_resolution_premium
-    max_res = max_res_premium if premium else max_res_free
+    expires_at_ms = int((time.time() + 3600) * 1000)  # 1 hour
 
+    # Build schema-compliant links array.
+    # Backend sends ALL quality links for ALL users.
+    # premium: true draws a lock badge only — backend enforces on actual download.
     def _res_height(quality_str: str) -> int:
-        """Extract numeric height from a quality string like '1080p', '720p · Hindi'."""
         import re
         m = re.search(r"(\d{3,4})p", (quality_str or "").lower())
         return int(m.group(1)) if m else 0
 
-    if max_res > 0:
-        filtered = [l for l in all_links if _res_height(l.get("quality") or "") <= max_res]
-        links = filtered or all_links[:1]   # always give at least one link
-    else:
-        links = all_links
+    links = []
+    for link in all_links:
+        label     = link.get("quality") or "Auto"
+        res       = _res_height(label)
+        # Mark as premium if resolution is 1080p+ and user isn't premium
+        is_locked = (res >= 1080 and not is_premium)
+        links.append({
+            "label":      label,
+            "url":        link.get("download_url") or link.get("url", ""),
+            "language":   link.get("language") or "English",
+            "size_bytes": link.get("size_bytes") or link.get("size") or 0,
+            "premium":    is_locked,
+        })
 
     return {
-        "ok":      result.get("ok", False),
-        "premium": premium,
-        # max_resolution tells the app what cap was applied (0 = no cap).
-        # The app uses this only for the lock badge UI — it never enforces caps itself.
-        "max_resolution": max_res,
-        "links": [
-            {
-                "label":      link.get("quality") or "Auto",
-                "url":        link.get("download_url") or link.get("url"),
-                "language":   link.get("language") or "English",
-                # Pass real file size from provider if available
-                "size_bytes": link.get("size_bytes") or link.get("size") or 0,
-            }
-            for link in links
-        ],
+        "ok":            result.get("ok", False),
+        "links":         links,
+        "expires_at_ms": expires_at_ms,
     }
-
-
-@router.get("/download/proxy")
-async def download_proxy(
-    url:      str           = Query(...),
-    filename: Optional[str] = Query(None),
-    referer:  Optional[str] = Query(None),
-    user_id: str = Depends(verify_engine),   # LOGIN REQUIRED
-):
-    """Proxy a direct media URL as a browser download with correct headers."""
-    from ENGINE.manager.download import proxy_download
-    return await proxy_download(url, filename=filename, referer=referer)

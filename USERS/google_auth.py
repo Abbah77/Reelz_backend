@@ -1,15 +1,9 @@
 """
 USERS/google_auth.py — Verify a Google ID token and upsert the User row.
 
-Flow:
-  1. Verify the Firebase/Google ID token against Google's public certs.
-  2. Extract sub, email, name, picture.
-  3. Upsert into users table (creates on first sign-in).
-  4. Issue our own JWT.
-
-We verify tokens using Google's tokeninfo endpoint for simplicity.
-For production scale, swap to google-auth-library which verifies offline
-against cached public keys (no network round-trip per request).
+Schema v3:
+- name, email, photo_url are NOT returned — Google SDK provides them to the app directly.
+- Returns: ok, user_id, access_token, refresh_token, expires_at_ms, premium, premium_expires_at_ms
 """
 from __future__ import annotations
 
@@ -21,7 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from USERS.models import User
-from USERS.jwt import sign
+from USERS.jwt import sign, sign_refresh
 from config import get_settings
 
 _s = get_settings()
@@ -30,10 +24,7 @@ _GOOGLE_TOKENINFO = "https://oauth2.googleapis.com/tokeninfo"
 
 
 async def _verify_google_token(id_token: str) -> dict:
-    """
-    Verify a Google ID token.
-    Returns decoded claims or raises HTTPException 401.
-    """
+    """Verify a Google ID token. Returns decoded claims or raises HTTPException 401."""
     try:
         async with httpx.AsyncClient(timeout=10) as client:
             r = await client.get(_GOOGLE_TOKENINFO, params={"id_token": id_token})
@@ -43,7 +34,6 @@ async def _verify_google_token(id_token: str) -> dict:
     except httpx.RequestError:
         raise HTTPException(status_code=503, detail="Could not reach Google auth servers")
 
-    # Validate audience matches our client ID (if configured)
     if _s.google_client_id:
         aud = claims.get("aud", "")
         azp = claims.get("azp", "")
@@ -58,8 +48,8 @@ async def _verify_google_token(id_token: str) -> dict:
 
 async def google_sign_in(id_token: str, db: AsyncSession) -> dict:
     """
-    Verify Google ID token, upsert user, issue JWT.
-    Returns the full auth response dict.
+    Verify Google ID token, upsert user, issue JWT access + refresh tokens.
+    Returns schema v3 auth response.
     """
     claims = await _verify_google_token(id_token)
 
@@ -68,12 +58,11 @@ async def google_sign_in(id_token: str, db: AsyncSession) -> dict:
     name       = claims.get("name", "")
     photo_url  = claims.get("picture")
 
-    # Upsert: find by google_sub, fall back to email
+    # Upsert
     result = await db.execute(select(User).where(User.google_sub == google_sub))
     user = result.scalar_one_or_none()
 
     if user is None:
-        # Check if email already exists (e.g. from a different Google account)
         r2 = await db.execute(select(User).where(User.email == email))
         user = r2.scalar_one_or_none()
 
@@ -87,23 +76,21 @@ async def google_sign_in(id_token: str, db: AsyncSession) -> dict:
         )
         db.add(user)
     else:
-        # Update profile info
         user.google_sub = google_sub
         user.name       = name or user.name
         user.photo_url  = photo_url or user.photo_url
 
     await db.flush()
 
-    token, expires_at_ms = sign(user.id, email)
+    access_token, expires_at_ms = sign(user.id, email)
+    refresh_token = sign_refresh(user.id)
 
     return {
-        "ok":           True,
-        "user_id":      user.id,
-        "access_token": token,
-        "premium":      user.is_premium_active(),
-        "status":       user.status,
-        "expires_at_ms": expires_at_ms,
-        "name":         user.name,
-        "email":        user.email,
-        "photo_url":    user.photo_url,
+        "ok":                    True,
+        "user_id":               user.id,
+        "access_token":          access_token,
+        "refresh_token":         refresh_token,
+        "expires_at_ms":         expires_at_ms,
+        "premium":               user.is_premium_active(),
+        "premium_expires_at_ms": user.premium_expires_at if user.is_premium_active() else 0,
     }

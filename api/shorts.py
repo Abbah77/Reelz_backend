@@ -1,11 +1,11 @@
 """
 api/shorts.py — GET /api/v1/shorts
 
-Cursor-paginated shorts feed matching ShortsResponseDto:
-    { items, has_more, next_cursor }
+Cursor-paginated shorts feed.
+GUEST-accessible: no login required.
 
-GUEST-accessible: no login required. Shorts are a core browsing feature.
-Stream resolution inside the ENGINE still requires login (via /stream).
+Response: { items[], has_more, next_cursor }
+Item:     { id, title, source, url, thumbnail }
 """
 from __future__ import annotations
 
@@ -18,7 +18,7 @@ from api.auth import verify
 
 router = APIRouter(prefix="/api/v1", tags=["Shorts"])
 
-_DEFAULT_TMDB_ID = 0      # 0 = "all" — handled by provider
+_DEFAULT_TMDB_ID = 0
 
 
 def _decode_page(cursor: Optional[str]) -> int:
@@ -55,17 +55,14 @@ async def get_shorts(
 
     items = [
         {
-            "id":           s.get("url", ""),
-            "title":        s.get("title", ""),
-            "author":       s.get("provider", ""),
-            "hls_url":      s.get("url", "") if s.get("url", "").endswith(".m3u8") else "",
-            "fallback_url": s.get("url", ""),
-            "thumbnail":    s.get("thumbnail", ""),
-            "duration":     0,
-            "width":        1080,
-            "height":       1920,
+            "id":        s.get("url", ""),
+            "title":     s.get("title", ""),
+            "source":    s.get("provider") or s.get("source") or "original",
+            "url":       s.get("url", ""),
+            "thumbnail": s.get("thumbnail") or None,
         }
         for s in raw_shorts[:limit]
+        if s.get("url")
     ]
 
     has_more = len(raw_shorts) >= limit

@@ -1,11 +1,12 @@
 """
 CATALOG/tmdb.py — TMDB API client used exclusively by CATALOG layer.
 
-Rules:
-- CATALOG may call TMDB. ENGINE providers may NOT call this directly.
-- All image URLs are fully resolved here (no raw paths leak out).
-- Results are plain dicts; callers convert to their own shapes.
-- Every endpoint caches aggressively (24 h for detail, 1 h for lists).
+Schema v3 MediaCard:
+  { id, title, poster_url, rating, media_type }
+  — no backdrop_url, release_year, genres, language, section_tag
+
+Schema v3 Detail adds maturity_rating, seasons only need season_number.
+Schema v3 Episode: id, episode_number, season_number, name, overview, still_url, runtime.
 """
 from __future__ import annotations
 
@@ -43,10 +44,9 @@ def profile(path: Optional[str]) -> Optional[str]:
 # ── Low-level fetcher ─────────────────────────────────────────────────────────
 
 async def _get(path: str, params: dict | None = None) -> Optional[dict]:
-    """GET from TMDB API. Returns parsed JSON or None on error."""
     if not _s.tmdb_api_key:
         return None
-    p = {"api_key": _s.tmdb_api_key, **(params or {})}
+    p   = {"api_key": _s.tmdb_api_key, **(params or {})}
     url = f"{_s.tmdb_base_url}{path}"
     try:
         client = await get_client()
@@ -68,16 +68,15 @@ async def _cached_get(key: str, path: str, params: dict | None = None, ttl: int 
     return data
 
 
-# ── Genre lookup (cached indefinitely per session) ────────────────────────────
+# ── Genre lookup ──────────────────────────────────────────────────────────────
 
 async def get_genres(media_type: str = "movie") -> list[dict]:
-    """Returns [{id, name}, ...] for movie or tv."""
-    key = f"tmdb:genres:{media_type}"
+    key   = f"tmdb:genres:{media_type}"
     cached = await cache_get(key)
     if cached:
         return cached
     mtype = "movie" if media_type == "movie" else "tv"
-    data = await _get(f"/genre/{mtype}/list")
+    data  = await _get(f"/genre/{mtype}/list")
     genres = data.get("genres", []) if data else []
     if genres:
         await cache_set(key, genres, ttl=86_400)
@@ -87,25 +86,23 @@ async def get_genres(media_type: str = "movie") -> list[dict]:
 # ── Search ────────────────────────────────────────────────────────────────────
 
 async def search_multi(query: str, page: int = 1) -> dict:
-    """TMDB multi search. Returns raw TMDB response."""
-    key = f"tmdb:search:multi:{query}:{page}"
+    key    = f"tmdb:search:multi:{query}:{page}"
     cached = await cache_get(key)
     if cached:
         return cached
-    data = await _get("/search/multi", {"query": query, "page": page, "include_adult": "false"})
+    data   = await _get("/search/multi", {"query": query, "page": page, "include_adult": "false"})
     result = data or {"results": [], "total_pages": 0, "total_results": 0}
     await cache_set(key, result, ttl=300)
     return result
 
 
 async def search_typed(query: str, media_type: str, page: int = 1) -> dict:
-    """Search movies or tv separately."""
-    mtype = "movie" if media_type == "movie" else "tv"
-    key = f"tmdb:search:{mtype}:{query}:{page}"
+    mtype  = "movie" if media_type == "movie" else "tv"
+    key    = f"tmdb:search:{mtype}:{query}:{page}"
     cached = await cache_get(key)
     if cached:
         return cached
-    data = await _get(f"/search/{mtype}", {"query": query, "page": page, "include_adult": "false"})
+    data   = await _get(f"/search/{mtype}", {"query": query, "page": page, "include_adult": "false"})
     result = data or {"results": [], "total_pages": 0, "total_results": 0}
     await cache_set(key, result, ttl=300)
     return result
@@ -117,45 +114,31 @@ _SORT_MAP = {
     "popularity": "popularity.desc",
     "rating":     "vote_average.desc",
     "newest":     "primary_release_date.desc",
-    "oldest":     "primary_release_date.asc",
 }
 
 async def discover(
     media_type: str = "movie",
     genre_id: Optional[str] = None,
-    language: Optional[str] = None,
     sort_by: str = "popularity",
-    year_from: Optional[int] = None,
-    year_to: Optional[int] = None,
-    rating_min: Optional[float] = None,
     page: int = 1,
+    **_kwargs,  # absorb any extra params safely
 ) -> dict:
-    mtype = "movie" if media_type == "movie" else "tv"
+    mtype     = "movie" if media_type == "movie" else "tv"
     tmdb_sort = _SORT_MAP.get(sort_by, "popularity.desc")
     params: dict[str, Any] = {
-        "sort_by": tmdb_sort,
-        "page": page,
+        "sort_by":        tmdb_sort,
+        "page":           page,
         "vote_count.gte": 50,
-        "include_adult": "false",
+        "include_adult":  "false",
     }
     if genre_id:
         params["with_genres"] = genre_id
-    if language:
-        params["with_original_language"] = language
-    if year_from:
-        key_date = "primary_release_date.gte" if mtype == "movie" else "first_air_date.gte"
-        params[key_date] = f"{year_from}-01-01"
-    if year_to:
-        key_date2 = "primary_release_date.lte" if mtype == "movie" else "first_air_date.lte"
-        params[key_date2] = f"{year_to}-12-31"
-    if rating_min is not None:
-        params["vote_average.gte"] = rating_min
 
-    cache_key = f"tmdb:discover:{mtype}:{sort_by}:{genre_id}:{language}:{year_from}:{year_to}:{rating_min}:{page}"
-    cached = await cache_get(cache_key)
+    cache_key = f"tmdb:discover:{mtype}:{sort_by}:{genre_id}:{page}"
+    cached    = await cache_get(cache_key)
     if cached:
         return cached
-    data = await _get(f"/discover/{mtype}", params)
+    data   = await _get(f"/discover/{mtype}", params)
     result = data or {"results": [], "total_pages": 0}
     await cache_set(cache_key, result, ttl=1800)
     return result
@@ -168,7 +151,7 @@ async def get_movie_detail(tmdb_id: int) -> Optional[dict]:
     return await _cached_get(
         key,
         f"/movie/{tmdb_id}",
-        {"append_to_response": "credits,videos,similar,keywords"},
+        {"append_to_response": "credits,videos,similar,release_dates"},
         ttl=86_400,
     )
 
@@ -178,7 +161,7 @@ async def get_tv_detail(tmdb_id: int) -> Optional[dict]:
     return await _cached_get(
         key,
         f"/tv/{tmdb_id}",
-        {"append_to_response": "credits,videos,similar,keywords"},
+        {"append_to_response": "credits,videos,similar,content_ratings"},
         ttl=86_400,
     )
 
@@ -191,11 +174,11 @@ async def get_season_detail(tmdb_id: int, season_number: int) -> Optional[dict]:
 # ── Curated list fetchers (for feed) ─────────────────────────────────────────
 
 async def _list(path: str, page: int = 1, ttl: int = 3600) -> list[dict]:
-    key = f"tmdb:list:{path}:{page}"
+    key    = f"tmdb:list:{path}:{page}"
     cached = await cache_get(key)
     if cached is not None:
         return cached
-    data = await _get(path, {"page": page})
+    data  = await _get(path, {"page": page})
     items = (data or {}).get("results", [])
     if items:
         await cache_set(key, items, ttl=ttl)
@@ -230,52 +213,40 @@ async def upcoming_movies(page: int = 1) -> list[dict]:
     return await _list("/movie/upcoming", page)
 
 async def bollywood_movies(page: int = 1) -> list[dict]:
-    key = f"tmdb:list:bollywood:{page}"
+    key    = f"tmdb:list:bollywood:{page}"
     cached = await cache_get(key)
     if cached is not None:
         return cached
-    data = await _get(
-        "/discover/movie",
-        {"with_original_language": "hi", "sort_by": "popularity.desc",
-         "vote_count.gte": 30, "page": page},
-    )
+    data  = await _get("/discover/movie", {"with_original_language": "hi", "sort_by": "popularity.desc", "vote_count.gte": 30, "page": page})
     items = (data or {}).get("results", [])
     if items:
         await cache_set(key, items, ttl=3600)
     return items
 
 async def anime_tv(page: int = 1) -> list[dict]:
-    key = f"tmdb:list:anime:{page}"
+    key    = f"tmdb:list:anime:{page}"
     cached = await cache_get(key)
     if cached is not None:
         return cached
-    data = await _get(
-        "/discover/tv",
-        {"with_genres": "16", "with_original_language": "ja",
-         "sort_by": "popularity.desc", "page": page},
-    )
+    data  = await _get("/discover/tv", {"with_genres": "16", "with_original_language": "ja", "sort_by": "popularity.desc", "page": page})
     items = (data or {}).get("results", [])
     if items:
         await cache_set(key, items, ttl=3600)
     return items
 
 async def kdrama(page: int = 1) -> list[dict]:
-    key = f"tmdb:list:kdrama:{page}"
+    key    = f"tmdb:list:kdrama:{page}"
     cached = await cache_get(key)
     if cached is not None:
         return cached
-    data = await _get(
-        "/discover/tv",
-        {"with_original_language": "ko", "sort_by": "popularity.desc",
-         "vote_count.gte": 20, "page": page},
-    )
+    data  = await _get("/discover/tv", {"with_original_language": "ko", "sort_by": "popularity.desc", "vote_count.gte": 20, "page": page})
     items = (data or {}).get("results", [])
     if items:
         await cache_set(key, items, ttl=3600)
     return items
 
 
-# ── Shape normalizers — raw TMDB → clean dict for our API ────────────────────
+# ── Shape normalizers ─────────────────────────────────────────────────────────
 
 def _year(d: dict, is_movie: bool) -> Optional[str]:
     date = d.get("release_date") if is_movie else d.get("first_air_date")
@@ -283,24 +254,42 @@ def _year(d: dict, is_movie: bool) -> Optional[str]:
 
 
 def normalise_card(d: dict, media_type: str) -> dict:
-    """Convert a raw TMDB result to our MediaDto wire shape."""
-    is_movie = media_type == "movie"
+    """
+    Convert a raw TMDB result to schema v3 MediaCard wire shape.
+    Only: id, title, poster_url, rating, media_type
+    """
     return {
-        "id": f"{media_type}:{d['id']}",
-        "title": d.get("title") or d.get("name") or "",
+        "id":         f"{media_type}:{d['id']}",
+        "title":      d.get("title") or d.get("name") or "",
         "poster_url": poster(d.get("poster_path")),
-        "backdrop_url": backdrop(d.get("backdrop_path")),
-        "release_year": _year(d, is_movie),
-        "rating": round(d.get("vote_average", 0.0), 1),
+        "rating":     round(d.get("vote_average", 0.0), 1),
         "media_type": media_type,
-        "genres": [],           # genre names resolved separately when needed
-        "language": d.get("original_language", "en"),
-        "section_tag": "",
     }
 
 
+def _maturity_rating_movie(d: dict) -> Optional[str]:
+    """Extract US rating from release_dates for movies."""
+    release_dates = d.get("release_dates", {}).get("results", [])
+    for entry in release_dates:
+        if entry.get("iso_3166_1") == "US":
+            for rd in entry.get("release_dates", []):
+                cert = rd.get("certification", "")
+                if cert:
+                    return cert
+    return None
+
+
+def _maturity_rating_tv(d: dict) -> Optional[str]:
+    """Extract US rating from content_ratings for TV."""
+    content_ratings = d.get("content_ratings", {}).get("results", [])
+    for entry in content_ratings:
+        if entry.get("iso_3166_1") == "US":
+            return entry.get("rating") or None
+    return None
+
+
 def normalise_detail(d: dict, media_type: str) -> dict:
-    """Full detail dict from raw TMDB detail+append response."""
+    """Full detail dict — schema v3 shape."""
     is_movie = media_type == "movie"
     tmdb_id  = d["id"]
 
@@ -308,17 +297,15 @@ def normalise_detail(d: dict, media_type: str) -> dict:
     cast_raw = d.get("credits", {}).get("cast", [])[:20]
     cast = [
         {
-            "id": str(c["id"]),
-            "name": c["name"],
+            "name":      c["name"],
             "character": c.get("character", ""),
             "photo_url": profile(c.get("profile_path")),
-            "order": c.get("order", 99),
         }
         for c in cast_raw
     ]
 
-    # Trailer — first YouTube official trailer
-    videos = d.get("videos", {}).get("results", [])
+    # Trailer
+    videos  = d.get("videos", {}).get("results", [])
     trailer = next(
         (f"https://www.youtube.com/watch?v={v['key']}"
          for v in videos
@@ -326,63 +313,56 @@ def normalise_detail(d: dict, media_type: str) -> dict:
         None,
     )
 
-    # Similar
+    # Similar — MediaCard[]
     similar_raw = d.get("similar", {}).get("results", [])[:12]
-    similar = [normalise_card(s, media_type) for s in similar_raw]
+    similar     = [normalise_card(s, media_type) for s in similar_raw]
 
-    # Seasons (TV only)
+    # Seasons — only season_number per schema v3
     seasons = []
     for s in d.get("seasons", []):
         if s.get("season_number", 0) == 0:
-            continue  # skip specials season
-        seasons.append({
-            "id": f"tv:{tmdb_id}:s{s['season_number']}",
-            "season_number": s["season_number"],
-            "name": s.get("name", f"Season {s['season_number']}"),
-            "episode_count": s.get("episode_count", 0),
-            "poster_url": poster(s.get("poster_path")),
-            "overview": s.get("overview"),
-            "air_date": s.get("air_date"),
-        })
+            continue
+        seasons.append({"season_number": s["season_number"]})
 
     # Genres
     genres = [g["name"] for g in d.get("genres", [])]
 
-    # Spoken languages
-    langs = [l.get("english_name") or l.get("name", "") for l in d.get("spoken_languages", [])]
+    # Maturity rating
+    if is_movie:
+        maturity_rating = _maturity_rating_movie(d)
+    else:
+        maturity_rating = _maturity_rating_tv(d)
 
     return {
-        "id": f"{media_type}:{tmdb_id}",
-        "title": d.get("title") or d.get("name") or "",
-        "overview": d.get("overview", ""),
-        "poster_url": poster(d.get("poster_path")),
-        "backdrop_url": backdrop(d.get("backdrop_path")),
-        "release_year": _year(d, is_movie),
-        "rating": round(d.get("vote_average", 0.0), 1),
-        "runtime": d.get("runtime") or (d.get("episode_run_time") or [None])[0],
-        "media_type": media_type,
-        "genres": genres,
-        "status": d.get("status"),
-        "tagline": d.get("tagline") or None,
-        "seasons": seasons,
-        "cast": cast,
-        "trailer_url": trailer,
-        "similar": similar,
-        "imdb_id": d.get("imdb_id") or d.get("external_ids", {}).get("imdb_id"),
-        "spoken_languages": langs,
-        "cache_ttl_ms": 3_600_000,
+        "id":              f"{media_type}:{tmdb_id}",
+        "title":           d.get("title") or d.get("name") or "",
+        "tagline":         d.get("tagline") or None,
+        "overview":        d.get("overview", ""),
+        "poster_url":      poster(d.get("poster_path")),
+        "backdrop_url":    backdrop(d.get("backdrop_path")),
+        "release_year":    _year(d, is_movie),
+        "rating":          round(d.get("vote_average", 0.0), 1),
+        "runtime":         d.get("runtime") or (d.get("episode_run_time") or [None])[0],
+        "media_type":      media_type,
+        "maturity_rating": maturity_rating,
+        "genres":          genres,
+        "status":          d.get("status"),
+        "trailer_url":     trailer,
+        "cast":            cast,
+        "seasons":         seasons,
+        "similar":         similar,
+        "cache_ttl_ms":    3_600_000,
     }
 
 
 def normalise_episode(ep: dict, season_number: int) -> dict:
+    """Schema v3 episode shape: id, episode_number, season_number, name, overview, still_url, runtime."""
     return {
-        "id": f"ep:{ep.get('id', '')}",
+        "id":             f"ep:{ep.get('id', '')}",
         "episode_number": ep.get("episode_number", 0),
-        "season_number": season_number,
-        "name": ep.get("name", ""),
-        "overview": ep.get("overview", ""),
-        "still_url": still(ep.get("still_path")),
-        "air_date": ep.get("air_date"),
-        "runtime": ep.get("runtime"),
-        "rating": round(ep.get("vote_average", 0.0), 1),
+        "season_number":  season_number,
+        "name":           ep.get("name", ""),
+        "overview":       ep.get("overview", ""),
+        "still_url":      still(ep.get("still_path")),
+        "runtime":        ep.get("runtime"),
     }

@@ -4,8 +4,7 @@ api/payment.py — Payment routes.
 POST /payment/init    — initialize a Paystack transaction (requires JWT)
 POST /payment/webhook — Paystack webhook (verified by HMAC signature, NOT JWT)
 
-The app receives an authorizationUrl and opens it in a browser.
-Payment completion is confirmed exclusively via the Paystack webhook.
+Response: { ok, authorization_url, reference }
 """
 from __future__ import annotations
 
@@ -28,7 +27,7 @@ async def init_payment(
 ):
     """
     Initialise a Paystack transaction for the authenticated user.
-    Returns { authorizationUrl, reference }.
+    Returns { ok, authorization_url, reference }.
     """
     result = await db.execute(select(User).where(User.id == user_id))
     user   = result.scalar_one_or_none()
@@ -49,7 +48,6 @@ async def paystack_webhook(
     """
     Paystack calls this after a successful payment.
     Verified by HMAC-SHA512 signature — grants premium only here.
-    Register this URL in your Paystack dashboard.
     """
     body = await request.body()
     from USERS.payment import handle_webhook

@@ -1,8 +1,10 @@
 """
 api/subtitle.py — POST /api/v1/subtitles
 
-Accepts SubtitleRequestBody from the app:
-    { id, type, season, episode, languages }
+Auth is OPTIONAL. Guests get subtitles the same as free users.
+
+Request:  { id, type, season, episode, languages }
+Response: { ok, subtitles[] }
 """
 from __future__ import annotations
 
@@ -11,17 +13,17 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from api.auth import verify  # guest-ok: guests can fetch subtitles without login
+from api.auth import verify  # guest-ok
 
 router = APIRouter(prefix="/api/v1", tags=["Subtitles"])
 
 
 class SubtitleRequestBody(BaseModel):
-    id:        str        = Field(..., description="'movie:<tmdb_id>' or 'tv:<tmdb_id>'")
+    id:        str       = Field(..., description="Media ID")
     type:      str
-    season:    int        = Field(0, ge=0)
-    episode:   int        = Field(0, ge=0)
-    languages: list[str]  = Field(default_factory=lambda: ["en"])
+    season:    int       = Field(0, ge=0)
+    episode:   int       = Field(0, ge=0)
+    languages: list[str] = Field(default_factory=lambda: ["en"])
 
 
 def _parse_tmdb_id(media_id: str) -> Optional[int]:
@@ -48,7 +50,7 @@ class _EngineReq:
 async def get_subtitles(
     req: SubtitleRequestBody,
     fresh: int = Query(0),
-    user_id: Optional[str] = Depends(verify),  # GUEST-OK: None for guests, str for logged-in users
+    user_id: Optional[str] = Depends(verify),  # GUEST-OK
 ):
     tmdb_id = _parse_tmdb_id(req.id)
     if tmdb_id is None:
@@ -59,14 +61,14 @@ async def get_subtitles(
     from ENGINE.manager.subtitle import get_subtitles as engine_subtitles
     result = await engine_subtitles(engine_req, fresh=bool(fresh))
 
-    # Map to SubtitlesResponseDto
     subs = [
         {
             "url":      s.get("url", ""),
             "language": s.get("language", "en"),
-            "label":    s.get("label") or s.get("provider", ""),
+            "enabled":  s.get("language", "en") == "en",  # default: enable English
         }
         for s in result.get("subtitles", [])
+        if s.get("url")
     ]
 
     return {

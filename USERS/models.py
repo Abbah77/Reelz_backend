@@ -4,7 +4,6 @@ USERS/models.py — Database models.
 Tables:
   users        — one row per Google account
   sessions     — JWT refresh token tracking (optional; soft-logout possible)
-  watchlist    — user's saved media IDs
   history      — watch progress per media/episode
   payments     — Paystack transaction log
 """
@@ -41,7 +40,6 @@ class User(Base):
                                             onupdate=lambda: int(time.time() * 1000))
 
     # Relationships
-    watchlist: Mapped[list["WatchlistItem"]] = relationship(back_populates="user", cascade="all, delete-orphan")
     history:   Mapped[list["WatchHistory"]]  = relationship(back_populates="user", cascade="all, delete-orphan")
     payments:  Mapped[list["Payment"]]        = relationship(back_populates="user", cascade="all, delete-orphan")
 
@@ -55,18 +53,6 @@ class User(Base):
         if self.premium_expires_at and self.premium_expires_at < int(time.time() * 1000):
             return "expired"
         return self.plan or "active"
-
-
-class WatchlistItem(Base):
-    __tablename__ = "watchlist"
-    __table_args__ = (UniqueConstraint("user_id", "media_id"),)
-
-    id:       Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id:  Mapped[str] = mapped_column(String(64), ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    media_id: Mapped[str] = mapped_column(String(64), index=True)   # e.g. "movie:550"
-    added_at: Mapped[int] = mapped_column(BigInteger, default=lambda: int(time.time() * 1000))
-
-    user: Mapped["User"] = relationship(back_populates="watchlist")
 
 
 class WatchHistory(Base):

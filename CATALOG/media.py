@@ -2,11 +2,9 @@
 CATALOG/media.py — Media detail and season/episode resolution.
 
 ID format: "<type>:<tmdb_id>"  e.g. "movie:550" or "tv:1396"
-This is the canonical format used throughout the entire API.
 """
 from __future__ import annotations
 
-from typing import Optional
 from fastapi import HTTPException
 
 from CATALOG.tmdb import (
@@ -16,7 +14,6 @@ from CATALOG.tmdb import (
 
 
 def _parse_id(media_id: str) -> tuple[str, int]:
-    """Parse 'movie:550' → ('movie', 550). Raises 400 on bad format."""
     parts = media_id.split(":", 1)
     if len(parts) != 2 or parts[0] not in ("movie", "tv"):
         raise HTTPException(status_code=400, detail="ID must be 'movie:<tmdb_id>' or 'tv:<tmdb_id>'")
@@ -55,7 +52,6 @@ async def get_season(media_id: str, season_number: int) -> dict:
     ]
 
     return {
-        "id": f"tv:{tmdb_id}:s{season_number}",
-        "episodes": episodes,
+        "episodes":     episodes,
         "cache_ttl_ms": 86_400_000,
     }
