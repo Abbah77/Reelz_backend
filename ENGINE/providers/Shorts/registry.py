@@ -9,9 +9,11 @@ from __future__ import annotations
 
 from ENGINE.providers.base import Provider
 from ENGINE.providers.Shorts.R_301.R_301 import R301Provider
+from ENGINE.providers.Shorts.R_302.R_302 import R302Provider
 
 ACTIVE: list[Provider] = [
-    R301Provider(),   # TMDB Trailers
+    R301Provider(),   # TMDB Trailers (YouTube links, per-title)
+    R302Provider(),   # Archive.org TikToks (random MP4s, global feed)
 ]
 
 DISABLED: list[Provider] = []
