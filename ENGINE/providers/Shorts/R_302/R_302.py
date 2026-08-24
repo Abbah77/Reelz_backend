@@ -25,13 +25,20 @@ from ENGINE.providers.base import Provider, LinkData, Result, Short
 from ENGINE.tools.http import get_client, UA
 
 _SEARCH_URL = "https://archive.org/advancedsearch.php"
-_COLLECTION = "tiktoks"
-_COUNT = 30          # items to pull per call — enough to fill several pages
-_MAX_ROWS = 100      # archive.org hard cap for a single page response
+_COLLECTION  = "tiktoks"
+_COUNT       = 30    # items to pull per call — enough to fill several pages
+_MAX_ROWS    = 100   # archive.org hard cap for a single page response
+
+# Hard timeout for each archive.org HTTP call (seconds).
+# Kept well under provider_timeout_ms (45 s) so both calls can complete
+# before safe_run() cancels the coroutine, and under the Android client's
+# 12-second read timeout so a slow archive.org response is caught here
+# rather than at the client.
+_HTTP_TIMEOUT = 8
 
 
 class R302Provider(Provider):
-    id = "R-302"
+    id   = "R-302"
     name = "Archive.org TikToks"
 
     async def run(self, data: LinkData) -> Result:  # noqa: ARG002
@@ -43,12 +50,12 @@ class R302Provider(Provider):
             probe = await client.get(
                 _SEARCH_URL,
                 params={
-                    "q": f"collection:{_COLLECTION} mediatype:movies",
-                    "rows": 0,
+                    "q":      f"collection:{_COLLECTION} mediatype:movies",
+                    "rows":   0,
                     "output": "json",
                 },
                 headers={"User-Agent": UA},
-                timeout=8,
+                timeout=_HTTP_TIMEOUT,
             )
             if probe.status_code >= 400:
                 return result
@@ -57,23 +64,21 @@ class R302Provider(Provider):
             if not total:
                 return result
 
-            # ── Step 2: pick a random page and fetch items ────────────────
-            # We request _MAX_ROWS per page; pick a random starting page so
-            # every call lands on a different slice of the corpus.
+            # ── Step 2: pick a random page and fetch items ─────────────────
             max_page = max(1, total // _MAX_ROWS)
-            page = random.randint(1, max_page)
+            page     = random.randint(1, max_page)
 
             search = await client.get(
                 _SEARCH_URL,
                 params={
-                    "q": f"collection:{_COLLECTION} mediatype:movies",
-                    "fl[]": "identifier,title,description",
-                    "rows": _MAX_ROWS,
-                    "page": page,
-                    "output": "json",
+                    "q":     f"collection:{_COLLECTION} mediatype:movies",
+                    "fl[]":  "identifier,title,description",
+                    "rows":  _MAX_ROWS,
+                    "page":  page,
+                    "output":"json",
                 },
                 headers={"User-Agent": UA},
-                timeout=10,
+                timeout=_HTTP_TIMEOUT,
             )
             if search.status_code >= 400:
                 return result
@@ -91,24 +96,22 @@ class R302Provider(Provider):
                     continue
 
                 title = (doc.get("title") or doc.get("description") or iid).strip()
-                # Truncate long captions to something UI-friendly
                 if len(title) > 120:
                     title = title[:117] + "…"
 
-                # Direct MP4 — archive.org naming convention is consistent:
+                # Direct MP4 — archive.org naming convention:
                 # https://archive.org/download/{identifier}/{identifier}.mp4
                 mp4_url = f"https://archive.org/download/{iid}/{iid}.mp4"
 
-                # Thumbnail served by archive.org's image service
                 thumb_url = (
                     f"https://archive.org/services/get-item-image.php"
                     f"?identifier={iid}&mediatype=movies&collection={_COLLECTION}"
                 )
 
                 result.shorts.append(Short(
-                    url=mp4_url,
-                    title=title,
-                    thumbnail=thumb_url,
+                    url       = mp4_url,
+                    title     = title,
+                    thumbnail = thumb_url,
                 ))
 
         except Exception:

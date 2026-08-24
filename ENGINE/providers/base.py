@@ -32,10 +32,15 @@ class Stream:
 @dataclass
 class DownloadItem:
     url: str
-    type: str                        # "mp4" | "mkv"
+    type: str                        # "mp4" | "hls" | "mkv"
     quality: Optional[str] = None
     headers: dict = field(default_factory=dict)
     size_label: Optional[str] = None
+    size_bytes: int = 0
+    language: str = "English"
+    # For HLS: this should be the quality-specific index.m3u8 URL
+    # The backend resolves master → quality index before returning.
+    # For MP4: direct download URL.
 
 
 @dataclass

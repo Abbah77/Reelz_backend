@@ -3,13 +3,41 @@ api/download.py — POST /api/v1/download
 
 Auth is OPTIONAL — same as Stream. Guests get full download access.
 premium: true on a link shows a lock badge in the app (upsell only).
-Backend enforces premium-only access server-side when the download starts.
+Backend enforces premium-only access server-side.
 
-Request:  { id, type, season, episode }
-Response: { ok, links[], expires_at_ms }
+Request:
+    { "id": "movie:12345", "type": "movie", "season": 0, "episode": 0 }
+
+Response:
+    {
+        "ok": true,
+        "links": [
+            {
+                "label": "1080p",
+                "type": "hls",
+                "url": "https://.../index_1080p.m3u8",
+                "language": "English",
+                "size_bytes": 2147483648,
+                "premium": true
+            },
+            {
+                "label": "720p",
+                "type": "mp4",
+                "url": "https://.../movie_720p.mp4",
+                "language": "English",
+                "size_bytes": 1073741824,
+                "premium": false
+            }
+        ],
+        "expires_at_ms": 1724000000000
+    }
+
+Backend owns all provider logic and HLS master resolution.
+App receives ready-to-download URLs (mp4 or quality-specific index.m3u8).
 """
 from __future__ import annotations
 
+import re
 import time
 from typing import Optional
 
@@ -22,9 +50,9 @@ router = APIRouter(prefix="/api/v1", tags=["Download"])
 
 
 class StreamRequestBody(BaseModel):
-    """Same request body the app sends for both stream and download."""
-    id:      str = Field(..., description="Media ID")
-    type:    str
+    """Request body for download endpoint."""
+    id:      str = Field(..., description="Media ID (e.g. 'movie:12345' or '12345')")
+    type:    str = Field(..., description="'movie' or 'tv'")
     season:  int = Field(0, ge=0)
     episode: int = Field(0, ge=0)
 
@@ -36,7 +64,30 @@ def _parse_tmdb_id(media_id: str) -> Optional[int]:
             return int(parts[1])
         except ValueError:
             pass
-    return None
+    try:
+        return int(media_id)
+    except ValueError:
+        return None
+
+
+def _res_height(quality_str: str) -> int:
+    m = re.search(r"(\d{3,4})p", (quality_str or "").lower())
+    return int(m.group(1)) if m else 0
+
+
+async def _is_premium_user(user_id: Optional[str]) -> bool:
+    if not user_id:
+        return False
+    try:
+        from USERS.db import SessionLocal
+        from USERS.models import User
+        from sqlalchemy import select
+        async with SessionLocal() as session:
+            result = await session.execute(select(User).where(User.id == user_id))
+            user: Optional[User] = result.scalar_one_or_none()
+        return bool(user and user.is_premium_active())
+    except Exception:
+        return False
 
 
 class _EngineReq:
@@ -50,24 +101,11 @@ class _EngineReq:
         self.episode = body.episode or None
 
 
-async def _is_premium(user_id: Optional[str]) -> bool:
-    """Check if the authenticated user has an active premium subscription."""
-    if not user_id:
-        return False
-    from USERS.db import SessionLocal
-    from USERS.models import User
-    from sqlalchemy import select
-    async with SessionLocal() as session:
-        result = await session.execute(select(User).where(User.id == user_id))
-        user: Optional[User] = result.scalar_one_or_none()
-    return bool(user and user.is_premium_active())
-
-
 @router.post("/download")
 async def get_download_links(
-    req: StreamRequestBody,
-    fresh: int = Query(0),
-    user_id: Optional[str] = Depends(verify),   # GUEST-OK: None for guests
+    req:     StreamRequestBody,
+    fresh:   int = Query(0, description="Set to 1 to bypass cache"),
+    user_id: Optional[str] = Depends(verify),
 ):
     from config import get_settings
     from fastapi import HTTPException
@@ -78,42 +116,43 @@ async def get_download_links(
 
     tmdb_id = _parse_tmdb_id(req.id)
     if tmdb_id is None:
-        raise HTTPException(status_code=400, detail="Invalid id format. Use 'movie:<tmdb_id>' or 'tv:<tmdb_id>'")
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid id format. Use 'movie:<tmdb_id>', 'tv:<tmdb_id>', or bare numeric id.",
+        )
 
-    is_premium = await _is_premium(user_id)
-
+    is_premium = await _is_premium_user(user_id)
     engine_req = _EngineReq(req, tmdb_id)
+
     from ENGINE.manager.download import get_downloads
-    result = await get_downloads(engine_req, base_url="", fresh=bool(fresh))
+    result = await get_downloads(engine_req, fresh=bool(fresh))
 
-    all_links = result.get("links", [])
-
-    expires_at_ms = int((time.time() + 3600) * 1000)  # 1 hour
-
-    # Build schema-compliant links array.
-    # Backend sends ALL quality links for ALL users.
-    # premium: true draws a lock badge only — backend enforces on actual download.
-    def _res_height(quality_str: str) -> int:
-        import re
-        m = re.search(r"(\d{3,4})p", (quality_str or "").lower())
-        return int(m.group(1)) if m else 0
-
+    # Build schema-compliant links array
     links = []
-    for link in all_links:
-        label     = link.get("quality") or "Auto"
-        res       = _res_height(label)
-        # Mark as premium if resolution is 1080p+ and user isn't premium
+    for link in result.get("links", []):
+        label     = link.get("label") or "Auto"
+        link_type = link.get("type") or "mp4"   # "mp4" | "hls"
+        url       = link.get("url", "")
+        if not url:
+            continue
+
+        res = _res_height(label)
+        # 1080p+ is premium-locked for free users; backend enforces on actual download start
         is_locked = (res >= 1080 and not is_premium)
+
         links.append({
             "label":      label,
-            "url":        link.get("download_url") or link.get("url", ""),
+            "type":       link_type,
+            "url":        url,
             "language":   link.get("language") or "English",
-            "size_bytes": link.get("size_bytes") or link.get("size") or 0,
+            "size_bytes": int(link.get("size_bytes") or 0),
             "premium":    is_locked,
         })
 
+    expires_at_ms = int((time.time() + 3600) * 1000)
+
     return {
-        "ok":            result.get("ok", False),
+        "ok":            bool(links),
         "links":         links,
         "expires_at_ms": expires_at_ms,
     }
