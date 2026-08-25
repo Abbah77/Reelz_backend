@@ -31,6 +31,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends libxml2 libxslt
 RUN useradd -m -u 1001 reelz
 USER reelz
 
+# Cache bust — forces Docker to always copy fresh source on every build
+ARG CACHEBUST=1
 # Copy source
 COPY --chown=reelz:reelz . .
 
