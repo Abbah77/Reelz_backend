@@ -69,5 +69,5 @@ async def get_config():
 
     response = JSONResponse(content=payload)
     # Cache for 1 hour at CDN/browser level; stale-while-revalidate 10 min
-    response.headers["Cache-Control"] = "public, max-age=3600, stale-while-revalidate=600"
+    response.headers["Cache-Control"] = "no-store"
     return response
