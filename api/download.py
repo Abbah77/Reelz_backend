@@ -1,15 +1,21 @@
 """
-api/download.py — Download.
+api/download.py — Download route.
 cache_ttl_ms: computed per-provider by ENGINE/cache/ttl_policy.py
 """
 from __future__ import annotations
-import re, time
+
+import re
+import time
 from typing import Optional
-from fastapi import APIRouter, Depends, Query, Response
+
+from fastapi import APIRouter, Depends, HTTPException, Query, Response
 from pydantic import BaseModel, Field
+
 from api.auth import verify
 from api.envelope import ok, err
 from api.cache_headers import set_cache
+from api.media_request import parse_tmdb_id, EngineRequest
+from USERS.queries import is_premium_user
 
 router = APIRouter(prefix="/api/v1", tags=["Download"])
 
@@ -21,40 +27,9 @@ class StreamRequestBody(BaseModel):
     episode: int = Field(0, ge=0)
 
 
-def _parse_tmdb_id(media_id):
-    parts = media_id.split(":", 1)
-    if len(parts) == 2:
-        try: return int(parts[1])
-        except ValueError: pass
-    try: return int(media_id)
-    except ValueError: return None
-
-def _res_height(q):
+def _res_height(q: str) -> int:
     m = re.search(r"(\d{3,4})p", (q or "").lower())
     return int(m.group(1)) if m else 0
-
-async def _is_premium(user_id):
-    if not user_id: return False
-    try:
-        from USERS.db import SessionLocal
-        from USERS.models import User
-        from sqlalchemy import select
-        async with SessionLocal() as s:
-            r = await s.execute(select(User).where(User.id == user_id))
-            u = r.scalar_one_or_none()
-        return bool(u and u.is_premium_active())
-    except: return False
-
-
-class _EngineReq:
-    def __init__(self, body, tmdb_id):
-        self.tmdb_id = tmdb_id
-        self.type    = body.type
-        self.title   = ""
-        self.imdb_id = None
-        self.year    = None
-        self.season  = body.season or None
-        self.episode = body.episode or None
 
 
 @router.post("/download")
@@ -65,22 +40,27 @@ async def get_download_links(
     user_id: Optional[str] = Depends(verify),
 ):
     from config import get_settings
-    from fastapi import HTTPException
     if not get_settings().downloads_enabled:
         raise HTTPException(status_code=403, detail="Downloads not available")
 
-    tmdb_id = _parse_tmdb_id(req.id)
-    if tmdb_id is None:
-        raise HTTPException(status_code=400, detail="Invalid id format.")
+    tmdb_id = parse_tmdb_id(req.id)
+    engine_req = EngineRequest(
+        tmdb_id = tmdb_id,
+        type    = req.type,
+        season  = req.season or None,
+        episode = req.episode or None,
+    )
 
-    is_premium = await _is_premium(user_id)
+    is_premium = await is_premium_user(user_id)
+
     from ENGINE.manager.download import get_downloads
-    result = await get_downloads(_EngineReq(req, tmdb_id), fresh=bool(fresh))
+    result = await get_downloads(engine_req, fresh=bool(fresh))
 
     links = []
     for link in result.get("links", []):
         url = link.get("url", "")
-        if not url: continue
+        if not url:
+            continue
         res = _res_height(link.get("label", ""))
         links.append({
             "label":      link.get("label") or "Auto",
@@ -95,21 +75,17 @@ async def get_download_links(
         set_cache(response, None)
         return err("No download links available")
 
-    # Use smart TTL derived from provider policy (not a hardcoded value).
     cache_ttl_ms = result.get("cache_ttl_ms") or None
     cf_max_age_s = result.get("cf_max_age_s") or None
 
-    # expires_at_ms: when the download links themselves die (for the client).
     now_ms = int(time.time() * 1000)
-    link_expiries = [
-        lnk.get("expires_at_ms") for lnk in result.get("links", []) if lnk.get("expires_at_ms")
-    ]
+    link_expiries = [lnk.get("expires_at_ms") for lnk in result.get("links", []) if lnk.get("expires_at_ms")]
     if link_expiries:
         expires_at_ms = min(link_expiries)
     elif cache_ttl_ms:
         expires_at_ms = now_ms + cache_ttl_ms
     else:
-        expires_at_ms = now_ms + 3_600_000  # fallback 1h
+        expires_at_ms = now_ms + 3_600_000
 
     set_cache(response, cache_ttl_ms, cf_max_age_s=cf_max_age_s)
     return ok({

@@ -1,5 +1,5 @@
 """
-CATALOG/tmdb.py — TMDB API client used exclusively by CATALOG layer.
+CATALOG/tmdb.py — TMDB API client used exclusively by the CATALOG layer.
 
 Schema v3 MediaCard:
   { id, title, poster_url, rating, media_type }
@@ -7,13 +7,14 @@ Schema v3 MediaCard:
 
 Schema v3 Detail adds maturity_rating, seasons only need season_number.
 Schema v3 Episode: id, episode_number, season_number, name, overview, still_url, runtime.
+
+get_content_kind() is the single authoritative TMDB enrichment function used
+by ENGINE managers to detect anime / asian / bollywood content.
+Providers NEVER call TMDB directly — only managers do, through this function.
 """
 from __future__ import annotations
 
-import asyncio
 from typing import Any, Optional
-
-import httpx
 
 from ENGINE.cache.cache import get as cache_get, set as cache_set
 from ENGINE.tools.http import get_client, UA
@@ -121,7 +122,7 @@ async def discover(
     genre_id: Optional[str] = None,
     sort_by: str = "popularity",
     page: int = 1,
-    **_kwargs,  # absorb any extra params safely
+    **_kwargs,
 ) -> dict:
     mtype     = "movie" if media_type == "movie" else "tv"
     tmdb_sort = _SORT_MAP.get(sort_by, "popularity.desc")
@@ -293,7 +294,6 @@ def normalise_detail(d: dict, media_type: str) -> dict:
     is_movie = media_type == "movie"
     tmdb_id  = d["id"]
 
-    # Cast — top 20
     cast_raw = d.get("credits", {}).get("cast", [])[:20]
     cast = [
         {
@@ -304,7 +304,6 @@ def normalise_detail(d: dict, media_type: str) -> dict:
         for c in cast_raw
     ]
 
-    # Trailer
     videos  = d.get("videos", {}).get("results", [])
     trailer = next(
         (f"https://www.youtube.com/watch?v={v['key']}"
@@ -313,25 +312,18 @@ def normalise_detail(d: dict, media_type: str) -> dict:
         None,
     )
 
-    # Similar — MediaCard[]
     similar_raw = d.get("similar", {}).get("results", [])[:12]
     similar     = [normalise_card(s, media_type) for s in similar_raw]
 
-    # Seasons — only season_number per schema v3
     seasons = []
     for s in d.get("seasons", []):
         if s.get("season_number", 0) == 0:
             continue
         seasons.append({"season_number": s["season_number"]})
 
-    # Genres
     genres = [g["name"] for g in d.get("genres", [])]
 
-    # Maturity rating
-    if is_movie:
-        maturity_rating = _maturity_rating_movie(d)
-    else:
-        maturity_rating = _maturity_rating_tv(d)
+    maturity_rating = _maturity_rating_movie(d) if is_movie else _maturity_rating_tv(d)
 
     return {
         "id":              f"{media_type}:{tmdb_id}",
@@ -366,3 +358,82 @@ def normalise_episode(ep: dict, season_number: int) -> dict:
         "still_url":      still(ep.get("still_path")),
         "runtime":        ep.get("runtime"),
     }
+
+
+# ── Content kind enrichment (used by ENGINE managers only) ───────────────────
+
+_ANIME_KEYWORDS = {
+    "anime", "manga adaptation", "based on manga",
+    "based on light novel", "shounen", "shōnen", "seinen", "isekai",
+}
+_ASIAN_COUNTRIES = {"KR", "CN", "TW", "HK", "TH", "VN"}
+
+
+def _detect_kind(media_type: str, countries: list, genre_ids: list, keywords: list) -> str:
+    is_animation = 16 in genre_ids
+    kw = {k.lower() for k in keywords}
+    if ("JP" in countries and is_animation) or (kw & _ANIME_KEYWORDS):
+        return "anime"
+    if set(countries) & _ASIAN_COUNTRIES:
+        return "asian"
+    if "IN" in countries:
+        return "bollywood"
+    return media_type
+
+
+async def get_content_kind(tmdb_id: int, media_type: str) -> dict:
+    """
+    Return content-kind metadata for ENGINE managers:
+        { kind, is_anime, is_asian, is_bollywood, org_title }
+
+    Results are cached 24 h independently so they survive stream cache expiry.
+    Falls back to neutral defaults when TMDB key is absent or the request fails.
+
+    Rules:
+      - ENGINE managers call this; providers NEVER do.
+      - This is the ONLY place in the codebase that fetches TMDB for kind detection.
+    """
+    default = {
+        "kind":         media_type,
+        "is_anime":     False,
+        "is_asian":     False,
+        "is_bollywood": False,
+        "org_title":    None,
+    }
+
+    if not _s.tmdb_api_key:
+        return default
+
+    cache_key = f"tmdb:meta:{media_type}:{tmdb_id}"
+    cached = await cache_get(cache_key)
+    if cached:
+        return cached
+
+    mtype = "movie" if media_type == "movie" else "tv"
+    data = await _get(
+        f"/{mtype}/{tmdb_id}",
+        {"append_to_response": "keywords"},
+    )
+    if not data:
+        return default
+
+    countries = data.get("origin_country") or [
+        c.get("iso_3166_1", "") for c in data.get("production_countries", [])
+    ]
+    genre_ids = [g["id"] for g in data.get("genres", []) if "id" in g]
+    kw_block  = data.get("keywords", {})
+    kw_list   = kw_block.get("keywords") or kw_block.get("results", [])
+    keywords  = [k.get("name", "") for k in kw_list]
+
+    kind      = _detect_kind(media_type, countries, genre_ids, keywords)
+    org_title = data.get("original_title") or data.get("original_name")
+
+    meta = {
+        "kind":         kind,
+        "is_anime":     kind == "anime",
+        "is_asian":     kind == "asian",
+        "is_bollywood": kind == "bollywood",
+        "org_title":    org_title,
+    }
+    await cache_set(cache_key, meta, ttl=86_400)
+    return meta

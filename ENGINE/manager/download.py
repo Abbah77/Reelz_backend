@@ -1,5 +1,5 @@
 """
-ENGINE/manager/download.py — Download manager (v2).
+ENGINE/manager/download.py — Download manager.
 
 Flow:
     1. Cache → return instantly if hit
@@ -9,23 +9,21 @@ Flow:
     5. Deduplicate by (quality, type) — keep best per slot
     6. Cache + return
 
-Key upgrade:
-    - Download providers produce direct mp4/hls links as before
-    - Stream providers now also contribute to downloads:
-      their m3u8 URLs are resolved to quality-specific index.m3u8 files
-      so the app can download individual quality .ts segments
+Key design:
+    - Download providers produce direct mp4/hls links
+    - Stream providers also contribute: their m3u8 URLs are resolved to
+      quality-specific index.m3u8 files so the app can download .ts segments
     - Result schema: {label, type, url, language, size_bytes, premium}
 """
 from __future__ import annotations
 
 import asyncio
 import time
-from typing import Optional
 
+from CATALOG.tmdb import get_content_kind
 from ENGINE.cache.cache import get as cache_get, set as cache_set, download_key
 from ENGINE.cache.ttl_policy import pick_best_ttl, ttl_to_ms
 from ENGINE.manager.health import record, should_run
-from ENGINE.manager.tmdb import enrich
 from ENGINE.providers.base import safe_run, TimedOut, LinkData
 from ENGINE.providers.Download.registry import get_all as get_download_providers
 from ENGINE.providers.Stream.registry import get_all as get_stream_providers
@@ -34,7 +32,6 @@ from config import get_settings
 
 _s = get_settings()
 
-# Resolution sort weight
 _QUAL_WEIGHT = {"4k": 500, "2160p": 500, "1080p": 400, "720p": 300, "480p": 200, "360p": 100, "240p": 50}
 
 def _qual_weight(label: str) -> int:
@@ -58,7 +55,7 @@ async def _collect_from_download_providers(data: LinkData) -> list[dict]:
                 "provider":      p.name,
                 "provider_id":   p.id,
                 "label":         item.quality or "Auto",
-                "type":          item.type,          # "mp4" | "hls"
+                "type":          item.type,
                 "url":           item.url,
                 "language":      item.language,
                 "size_bytes":    item.size_bytes,
@@ -79,8 +76,7 @@ async def _collect_from_download_providers(data: LinkData) -> list[dict]:
 async def _collect_from_stream_providers(data: LinkData) -> list[dict]:
     """
     Fan-out to Stream providers, resolve HLS masters to quality-specific index.m3u8 URLs.
-    MP4 streams are returned as-is for direct download.
-    iframes are skipped (not downloadable).
+    MP4 streams are returned as-is. iframes are skipped (not downloadable).
     """
     providers = [p for p in get_stream_providers() if await should_run(p.id)]
     collected = []
@@ -106,7 +102,6 @@ async def _collect_from_stream_providers(data: LinkData) -> list[dict]:
                     "expires_at_ms": s.expires_at_ms,
                 })
             elif s.type in ("m3u8", "hls"):
-                # Resolve master → per-quality index.m3u8 URLs
                 variants = await resolve_master(s.url, headers=s.headers)
                 for v in variants:
                     local.append({
@@ -131,20 +126,12 @@ async def _collect_from_stream_providers(data: LinkData) -> list[dict]:
     return collected
 
 
-def _merge_and_rank(
-    download_links: list[dict],
-    stream_links:   list[dict],
-) -> list[dict]:
+def _merge_and_rank(download_links: list[dict], stream_links: list[dict]) -> list[dict]:
     """
     Merge download provider links + stream-derived links.
-    Strategy:
-      - Prefer dedicated download provider links (they're stable direct links)
-      - Fill missing quality slots from stream-resolved HLS
-      - Result: richest quality ladder possible (4K, 1080p, 720p, 480p, 360p, 240p)
-    Dedup: for each (label, type) slot, keep the one from a dedicated download provider first,
-    then HLS from streams.
+    Strategy: prefer dedicated download provider links; fill missing quality
+    slots from stream-resolved HLS. Dedup by quality label.
     """
-    # Slot: quality label → best entry
     slots: dict[str, dict] = {}
 
     def _upsert(entry: dict, priority: int):
@@ -155,22 +142,18 @@ def _merge_and_rank(
         elif priority > existing["_priority"]:
             slots[key] = {**entry, "_priority": priority}
 
-    # Download providers win (priority 2)
     for e in download_links:
         _upsert(e, 2)
-
-    # Stream-derived fill gaps (priority 1)
     for e in stream_links:
         _upsert(e, 1)
 
     ranked = sorted(slots.values(), key=lambda x: _qual_weight(x["label"]), reverse=True)
-    # Strip internal priority key
     for r in ranked:
         r.pop("_priority", None)
     return ranked
 
 
-async def get_downloads(req, base_url: str = "", *, fresh: bool = False) -> dict:
+async def get_downloads(req, *, fresh: bool = False) -> dict:
     t0 = time.monotonic()
     key = download_key(req.tmdb_id, req.type, req.season, req.episode)
 
@@ -188,7 +171,7 @@ async def get_downloads(req, base_url: str = "", *, fresh: bool = False) -> dict
                 "cf_max_age_s": cf_max_age_s,
             }
 
-    meta = await enrich(req.tmdb_id, req.type, req.title if hasattr(req, "title") else "")
+    meta = await get_content_kind(req.tmdb_id, req.type)
     data = LinkData(
         tmdb_id      = req.tmdb_id,
         type         = req.type,
@@ -203,7 +186,6 @@ async def get_downloads(req, base_url: str = "", *, fresh: bool = False) -> dict
         org_title    = meta["org_title"],
     )
 
-    # Fan-out both in parallel
     download_links, stream_links = await asyncio.gather(
         _collect_from_download_providers(data),
         _collect_from_stream_providers(data),
@@ -211,9 +193,6 @@ async def get_downloads(req, base_url: str = "", *, fresh: bool = False) -> dict
 
     links = _merge_and_rank(download_links, stream_links)
 
-    # ── Smart TTL: weakest link across all download entries ───────────────────
-    # Download links use stream provider TTL since that's where URLs originate.
-    # The pick_best_ttl function inspects provider_id + expires_at_ms per entry.
     app_ttl_s, cf_max_age_s = pick_best_ttl(links) if links else (0, 0)
     cache_ttl_ms = ttl_to_ms(app_ttl_s)
 
@@ -221,11 +200,11 @@ async def get_downloads(req, base_url: str = "", *, fresh: bool = False) -> dict
         await cache_set(key, {"links": links}, ttl=app_ttl_s)
 
     return {
-        "ok":          bool(links),
-        "links":       links,
-        "cached":      False,
-        "took_ms":     int((time.monotonic() - t0) * 1000),
-        "error":       None if links else "No download links found",
+        "ok":           bool(links),
+        "links":        links,
+        "cached":       False,
+        "took_ms":      int((time.monotonic() - t0) * 1000),
+        "error":        None if links else "No download links found",
         "cache_ttl_ms": cache_ttl_ms,
         "cf_max_age_s": cf_max_age_s,
     }

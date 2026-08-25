@@ -24,10 +24,10 @@ import time
 from typing import Optional
 from urllib.parse import urlparse
 
+from CATALOG.tmdb import get_content_kind
 from ENGINE.cache.cache import get as cache_get, set as cache_set, stream_key
 from ENGINE.cache.ttl_policy import pick_best_ttl, ttl_to_ms
 from ENGINE.manager.health import record, should_run
-from ENGINE.manager.tmdb import enrich
 from ENGINE.providers.base import safe_run, TimedOut, LinkData, Result, Stream
 from ENGINE.providers.Stream.registry import get_all
 from ENGINE.tools.warp import run_with_warp, normalize_mode
@@ -37,7 +37,7 @@ _s = get_settings()
 
 _TYPE_SCORE  = {"m3u8": 10, "mp4": 6, "iframe": 2}
 _QUAL_SCORE  = {"2160p": 100, "4k": 100, "1080p": 80, "720p": 60, "480p": 40, "360p": 20}
-_PROV_BONUS  = {"R-009": 5, "R-002": 4, "R-005": 3, "R-013": 3, "R-012": 2}
+_PROV_BONUS  = {"R_009": 5, "R_002": 4, "R_005": 3, "R_013": 3, "R_012": 2}
 
 
 def _score(stream: Stream, pid: str) -> int:
@@ -74,15 +74,14 @@ async def _fan_out(data: LinkData) -> tuple[Optional[dict], list[dict]]:
             if not s.url:
                 continue
             entry = {
-                "provider": p.name,
+                "provider":    p.name,
                 "provider_id": p.id,
-                "server": s.server or p.name,
-                "url": s.url,
-                "type": s.type,
-                "quality": s.quality,
-                "headers": s.headers,
-                "playable": s.type != "iframe",
-                # Carry expiry from provider if it was set.
+                "server":      s.server or p.name,
+                "url":         s.url,
+                "type":        s.type,
+                "quality":     s.quality,
+                "headers":     s.headers,
+                "playable":    s.type != "iframe",
                 "expires_at_ms": s.expires_at_ms,
             }
             local.append((entry, _score(s, p.id)))
@@ -138,40 +137,35 @@ async def get_streams(req, *, fresh: bool = False, warp_mode: str = "off") -> di
         if cached:
             streams = cached.get("streams", [])
             best = next((s for s in streams if s.get("type") == "m3u8"), streams[0] if streams else None)
-            # Re-derive TTL from cached stream entries so the HTTP response
-            # reflects remaining lifetime rather than a static hardcoded value.
             app_ttl_s, cf_max_age_s = pick_best_ttl(streams) if streams else (0, 0)
             return {
-                "ok": bool(best),
-                "stream": best,
-                "streams": streams,
-                "cached": True,
-                "took_ms": int((time.monotonic() - t0) * 1000),
+                "ok":           bool(best),
+                "stream":       best,
+                "streams":      streams,
+                "cached":       True,
+                "took_ms":      int((time.monotonic() - t0) * 1000),
                 "cache_ttl_ms": ttl_to_ms(app_ttl_s),
                 "cf_max_age_s": cf_max_age_s,
             }
 
-    meta = await enrich(req.tmdb_id, req.type, req.title)
+    meta = await get_content_kind(req.tmdb_id, req.type)
     data = LinkData(
-        tmdb_id=req.tmdb_id,
-        type=req.type,
-        title=req.title,
-        imdb_id=req.imdb_id,
-        year=req.year,
-        season=req.season,
-        episode=req.episode,
-        is_anime=meta["is_anime"],
-        is_asian=meta["is_asian"],
-        is_bollywood=meta["is_bollywood"],
-        org_title=meta["org_title"],
+        tmdb_id      = req.tmdb_id,
+        type         = req.type,
+        title        = req.title,
+        imdb_id      = req.imdb_id,
+        year         = req.year,
+        season       = req.season,
+        episode      = req.episode,
+        is_anime     = meta["is_anime"],
+        is_asian     = meta["is_asian"],
+        is_bollywood = meta["is_bollywood"],
+        org_title    = meta["org_title"],
     )
 
     mode = normalize_mode(warp_mode)
     winner, streams = await run_with_warp(lambda: _fan_out(data), mode=mode)
 
-    # ── Compute smart TTL before caching ─────────────────────────────────────
-    # pick_best_ttl inspects each stream's provider_id and expires_at_ms.
-    # It chooses the weakest-link TTL so the batch stays valid for all streams.
     app_ttl_s, cf_max_age_s = pick_best_ttl(streams) if streams else (0, 0)
     cache_ttl_ms = ttl_to_ms(app_ttl_s)
 
@@ -179,13 +173,12 @@ async def get_streams(req, *, fresh: bool = False, warp_mode: str = "off") -> di
         await cache_set(key, {"streams": streams}, ttl=app_ttl_s)
 
     return {
-        "ok": winner is not None,
-        "stream": winner,
-        "streams": streams,
-        "cached": False,
-        "took_ms": int((time.monotonic() - t0) * 1000),
-        "error": None if winner else "No streams found",
-        # These are consumed by the API route to set Cache-Control + envelope TTL.
+        "ok":           winner is not None,
+        "stream":       winner,
+        "streams":      streams,
+        "cached":       False,
+        "took_ms":      int((time.monotonic() - t0) * 1000),
+        "error":        None if winner else "No streams found",
         "cache_ttl_ms": cache_ttl_ms,
         "cf_max_age_s": cf_max_age_s,
     }

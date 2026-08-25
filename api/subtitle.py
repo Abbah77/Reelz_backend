@@ -1,14 +1,18 @@
 """
-api/subtitle.py — Subtitles.
-cache_ttl_ms: None
+api/subtitle.py — Subtitles route.
+cache_ttl_ms: None (subtitles are not cached)
 """
 from __future__ import annotations
+
 from typing import Optional
+
 from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
+
 from api.auth import verify
 from api.envelope import ok
 from api.cache_headers import set_cache
+from api.media_request import parse_tmdb_id, EngineRequest
 
 router = APIRouter(prefix="/api/v1", tags=["Subtitles"])
 
@@ -21,24 +25,6 @@ class SubtitleRequestBody(BaseModel):
     languages: list[str] = Field(default_factory=lambda: ["en"])
 
 
-def _parse_tmdb_id(media_id):
-    parts = media_id.split(":", 1)
-    if len(parts) == 2:
-        try: return int(parts[1])
-        except ValueError: pass
-    return None
-
-
-class _EngineReq:
-    def __init__(self, body, tmdb_id):
-        self.tmdb_id   = tmdb_id
-        self.type      = body.type
-        self.imdb_id   = None
-        self.season    = body.season or None
-        self.episode   = body.episode or None
-        self.languages = body.languages
-
-
 @router.post("/subtitles")
 async def get_subtitles(
     req: SubtitleRequestBody,
@@ -46,15 +32,24 @@ async def get_subtitles(
     fresh: int = Query(0),
     user_id: Optional[str] = Depends(verify),
 ):
-    tmdb_id = _parse_tmdb_id(req.id)
-    if tmdb_id is None:
-        from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="Invalid id format.")
+    tmdb_id = parse_tmdb_id(req.id)
+    engine_req = EngineRequest(
+        tmdb_id = tmdb_id,
+        type    = req.type,
+        season  = req.season or None,
+        episode = req.episode or None,
+    )
+    # Attach languages so the subtitle manager can pass them to providers
+    engine_req.languages = req.languages  # type: ignore[attr-defined]
 
     from ENGINE.manager.subtitle import get_subtitles as engine_subtitles
-    result = await engine_subtitles(_EngineReq(req, tmdb_id), fresh=bool(fresh))
+    result = await engine_subtitles(engine_req, fresh=bool(fresh))
     subs = [
-        {"url": s.get("url",""), "language": s.get("language","en"), "enabled": s.get("language","en") == "en"}
+        {
+            "url":      s.get("url", ""),
+            "language": s.get("language", "en"),
+            "enabled":  s.get("language", "en") == "en",
+        }
         for s in result.get("subtitles", []) if s.get("url")
     ]
     set_cache(response, None)
