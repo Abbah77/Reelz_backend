@@ -23,6 +23,7 @@ import time
 from typing import Optional
 
 from ENGINE.cache.cache import get as cache_get, set as cache_set, download_key
+from ENGINE.cache.ttl_policy import pick_best_ttl, ttl_to_ms
 from ENGINE.manager.health import record, should_run
 from ENGINE.manager.tmdb import enrich
 from ENGINE.providers.base import safe_run, TimedOut, LinkData
@@ -54,14 +55,15 @@ async def _collect_from_download_providers(data: LinkData) -> list[dict]:
             if not item.url:
                 continue
             local.append({
-                "provider":    p.name,
-                "provider_id": p.id,
-                "label":       item.quality or "Auto",
-                "type":        item.type,          # "mp4" | "hls"
-                "url":         item.url,
-                "language":    item.language,
-                "size_bytes":  item.size_bytes,
-                "headers":     item.headers,
+                "provider":      p.name,
+                "provider_id":   p.id,
+                "label":         item.quality or "Auto",
+                "type":          item.type,          # "mp4" | "hls"
+                "url":           item.url,
+                "language":      item.language,
+                "size_bytes":    item.size_bytes,
+                "headers":       item.headers,
+                "expires_at_ms": item.expires_at_ms,
             })
         outcome = "found" if local else "failed" if isinstance(result, TimedOut) else "empty"
         await record(p.id, outcome, ms)
@@ -93,28 +95,30 @@ async def _collect_from_stream_providers(data: LinkData) -> list[dict]:
                 continue
             if s.type == "mp4":
                 local.append({
-                    "provider":    p.name,
-                    "provider_id": p.id,
-                    "label":       s.quality or "Auto",
-                    "type":        "mp4",
-                    "url":         s.url,
-                    "language":    "English",
-                    "size_bytes":  0,
-                    "headers":     s.headers,
+                    "provider":      p.name,
+                    "provider_id":   p.id,
+                    "label":         s.quality or "Auto",
+                    "type":          "mp4",
+                    "url":           s.url,
+                    "language":      "English",
+                    "size_bytes":    0,
+                    "headers":       s.headers,
+                    "expires_at_ms": s.expires_at_ms,
                 })
             elif s.type in ("m3u8", "hls"):
                 # Resolve master → per-quality index.m3u8 URLs
                 variants = await resolve_master(s.url, headers=s.headers)
                 for v in variants:
                     local.append({
-                        "provider":    p.name,
-                        "provider_id": p.id,
-                        "label":       v["quality"],
-                        "type":        "hls",
-                        "url":         v["url"],
-                        "language":    "English",
-                        "size_bytes":  0,
-                        "headers":     s.headers,
+                        "provider":      p.name,
+                        "provider_id":   p.id,
+                        "label":         v["quality"],
+                        "type":          "hls",
+                        "url":           v["url"],
+                        "language":      "English",
+                        "size_bytes":    0,
+                        "headers":       s.headers,
+                        "expires_at_ms": s.expires_at_ms,
                     })
         outcome = "found" if local else "failed" if isinstance(result, TimedOut) else "empty"
         await record(p.id, outcome, ms)
@@ -173,11 +177,15 @@ async def get_downloads(req, base_url: str = "", *, fresh: bool = False) -> dict
     if not fresh:
         cached = await cache_get(key)
         if cached:
+            links = cached.get("links", [])
+            app_ttl_s, cf_max_age_s = pick_best_ttl(links) if links else (0, 0)
             return {
-                "ok":      True,
-                "links":   cached.get("links", []),
-                "cached":  True,
-                "took_ms": int((time.monotonic() - t0) * 1000),
+                "ok":           True,
+                "links":        links,
+                "cached":       True,
+                "took_ms":      int((time.monotonic() - t0) * 1000),
+                "cache_ttl_ms": ttl_to_ms(app_ttl_s),
+                "cf_max_age_s": cf_max_age_s,
             }
 
     meta = await enrich(req.tmdb_id, req.type, req.title if hasattr(req, "title") else "")
@@ -203,13 +211,21 @@ async def get_downloads(req, base_url: str = "", *, fresh: bool = False) -> dict
 
     links = _merge_and_rank(download_links, stream_links)
 
-    if links:
-        await cache_set(key, {"links": links})
+    # ── Smart TTL: weakest link across all download entries ───────────────────
+    # Download links use stream provider TTL since that's where URLs originate.
+    # The pick_best_ttl function inspects provider_id + expires_at_ms per entry.
+    app_ttl_s, cf_max_age_s = pick_best_ttl(links) if links else (0, 0)
+    cache_ttl_ms = ttl_to_ms(app_ttl_s)
+
+    if links and app_ttl_s > 0:
+        await cache_set(key, {"links": links}, ttl=app_ttl_s)
 
     return {
-        "ok":      bool(links),
-        "links":   links,
-        "cached":  False,
-        "took_ms": int((time.monotonic() - t0) * 1000),
-        "error":   None if links else "No download links found",
+        "ok":          bool(links),
+        "links":       links,
+        "cached":      False,
+        "took_ms":     int((time.monotonic() - t0) * 1000),
+        "error":       None if links else "No download links found",
+        "cache_ttl_ms": cache_ttl_ms,
+        "cf_max_age_s": cf_max_age_s,
     }

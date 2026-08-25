@@ -1,6 +1,6 @@
 """
 api/download.py — Download.
-cache_ttl_ms: None — never cache download URLs
+cache_ttl_ms: computed per-provider by ENGINE/cache/ttl_policy.py
 """
 from __future__ import annotations
 import re, time
@@ -95,8 +95,24 @@ async def get_download_links(
         set_cache(response, None)
         return err("No download links available")
 
-    set_cache(response, None)  # never cache download URLs
+    # Use smart TTL derived from provider policy (not a hardcoded value).
+    cache_ttl_ms = result.get("cache_ttl_ms") or None
+    cf_max_age_s = result.get("cf_max_age_s") or None
+
+    # expires_at_ms: when the download links themselves die (for the client).
+    now_ms = int(time.time() * 1000)
+    link_expiries = [
+        lnk.get("expires_at_ms") for lnk in result.get("links", []) if lnk.get("expires_at_ms")
+    ]
+    if link_expiries:
+        expires_at_ms = min(link_expiries)
+    elif cache_ttl_ms:
+        expires_at_ms = now_ms + cache_ttl_ms
+    else:
+        expires_at_ms = now_ms + 3_600_000  # fallback 1h
+
+    set_cache(response, cache_ttl_ms, cf_max_age_s=cf_max_age_s)
     return ok({
         "links":         links,
-        "expires_at_ms": int((time.time() + 3600) * 1000),
-    }, cache_ttl_ms=None)
+        "expires_at_ms": expires_at_ms,
+    }, cache_ttl_ms=cache_ttl_ms)

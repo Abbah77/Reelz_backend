@@ -1,6 +1,7 @@
 """
 api/stream.py — Stream.
-cache_ttl_ms: None — never cache stream URLs
+cache_ttl_ms: computed per-provider by ENGINE/cache/ttl_policy.py
+              Short for rotating-token providers (R-009: 5min), longer for stable CDNs (R-008: 4h).
 """
 from __future__ import annotations
 import time
@@ -90,8 +91,28 @@ async def resolve_stream(
         set_cache(response, None)
         return err("No streams available for this title")
 
-    set_cache(response, None)  # never cache stream URLs
+    # Use the smart TTL computed by the stream manager from per-provider policy.
+    # cache_ttl_ms → app/client cache duration (in the envelope + max-age).
+    # cf_max_age_s → Cloudflare s-maxage (always shorter, CF evicts first).
+    cache_ttl_ms = result.get("cache_ttl_ms") or None
+    cf_max_age_s = result.get("cf_max_age_s") or None
+
+    # expires_at_ms in data = when the *links themselves* die (for the client player).
+    # Use the shortest per-stream expiry if available, else fall back to TTL window.
+    import time as _time
+    now_ms = int(_time.time() * 1000)
+    stream_expiries = [
+        s.get("expires_at_ms") for s in raw_streams if s.get("expires_at_ms")
+    ]
+    if stream_expiries:
+        expires_at_ms = min(stream_expiries)
+    elif cache_ttl_ms:
+        expires_at_ms = now_ms + cache_ttl_ms
+    else:
+        expires_at_ms = now_ms + 3_600_000  # fallback 1h
+
+    set_cache(response, cache_ttl_ms, cf_max_age_s=cf_max_age_s)
     return ok({
         "streams":       streams,
-        "expires_at_ms": int((time.time() + 3600) * 1000),
-    }, cache_ttl_ms=None)
+        "expires_at_ms": expires_at_ms,
+    }, cache_ttl_ms=cache_ttl_ms)

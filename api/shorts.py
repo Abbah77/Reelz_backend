@@ -1,6 +1,7 @@
 """
 api/shorts.py — Shorts.
-cache_ttl_ms: None — video URLs from providers expire fast
+cache_ttl_ms: computed per-provider by ENGINE/cache/ttl_policy.py
+              R-301 (TMDB/YouTube): 24h. R-302 (Archive.org): 7 days.
 """
 from __future__ import annotations
 import base64, hashlib, json
@@ -43,9 +44,14 @@ async def get_shorts(
         for i, s in enumerate(raw[:limit]) if s.get("url")
     ]
     has_more = len(items) >= limit
-    set_cache(response, None)
+
+    # Use real per-provider TTL (R-301 YouTube = 24h, R-302 Archive = 7d).
+    cache_ttl_ms = result.get("cache_ttl_ms") or None
+    cf_max_age_s = result.get("cf_max_age_s") or None
+
+    set_cache(response, cache_ttl_ms, cf_max_age_s=cf_max_age_s)
     return ok({
-        "items": items,
-        "has_more": has_more,
+        "items":       items,
+        "has_more":    has_more,
         "next_cursor": _encode_cursor(page + 1) if has_more else None,
-    }, cache_ttl_ms=None)
+    }, cache_ttl_ms=cache_ttl_ms)

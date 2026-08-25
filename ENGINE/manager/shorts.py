@@ -10,13 +10,13 @@ import asyncio
 import time
 
 from ENGINE.cache.cache import get as cache_get, set as cache_set, shorts_key
+from ENGINE.cache.ttl_policy import get_provider_ttl, ttl_to_ms
 from ENGINE.manager.health import record, should_run
 from ENGINE.providers.base import safe_run, TimedOut, LinkData
 from ENGINE.providers.Shorts.registry import get_all
 from config import get_settings
 
 _s = get_settings()
-_SHORTS_TTL = 86_400  # 24 hours
 
 
 async def get_shorts(*, tmdb_id: int, media_type: str, page: int = 1, fresh: bool = False) -> dict:
@@ -26,8 +26,22 @@ async def get_shorts(*, tmdb_id: int, media_type: str, page: int = 1, fresh: boo
     if not fresh:
         cached = await cache_get(key)
         if cached:
-            return {"ok": True, "shorts": cached.get("shorts", []), "page": page,
-                    "cached": True, "took_ms": int((time.monotonic() - t0) * 1000)}
+            items = cached.get("shorts", [])
+            provider_ids = list({s.get("provider_id", "") for s in items if s.get("provider_id")})
+            if provider_ids:
+                best_app_s = min(get_provider_ttl(pid)[0] for pid in provider_ids)
+                best_cf_s  = min(get_provider_ttl(pid)[1] for pid in provider_ids)
+            else:
+                best_app_s, best_cf_s = 86400, 72000
+            return {
+                "ok":           True,
+                "shorts":       items,
+                "page":         page,
+                "cached":       True,
+                "took_ms":      int((time.monotonic() - t0) * 1000),
+                "cache_ttl_ms": ttl_to_ms(best_app_s),
+                "cf_max_age_s": best_cf_s,
+            }
 
     data = LinkData(tmdb_id=tmdb_id, type=media_type, title="")
     providers = [p for p in get_all() if await should_run(p.id)]
@@ -42,10 +56,11 @@ async def get_shorts(*, tmdb_id: int, media_type: str, page: int = 1, fresh: boo
             if not s.url:
                 continue
             local.append({
-                "provider": p.name,
-                "title": s.title,
-                "url": s.url,
-                "thumbnail": s.thumbnail,
+                "provider":    p.name,
+                "provider_id": p.id,
+                "title":       s.title,
+                "url":         s.url,
+                "thumbnail":   s.thumbnail,
             })
         outcome = "found" if local else "failed" if isinstance(result, TimedOut) else "empty"
         await record(p.id, outcome, ms)
@@ -59,13 +74,27 @@ async def get_shorts(*, tmdb_id: int, media_type: str, page: int = 1, fresh: boo
     page_size = 20
     page_items = all_shorts[(page - 1) * page_size: page * page_size]
 
+    # ── Compute TTL from per-provider policy ──────────────────────────────────
+    # Shorts TTL is based on the weakest-link provider in the batch.
+    # R-301 (TMDB/YouTube) = 86400s, R-302 (Archive.org) = 604800s — both very long.
+    # Any unknown provider falls back to a conservative 1h.
     if page_items:
-        await cache_set(key, {"shorts": page_items}, ttl=_SHORTS_TTL)
+        provider_ids = list({s.get("provider_id", "") for s in page_items if s.get("provider_id")})
+        if provider_ids:
+            best_app_s = min(get_provider_ttl(pid)[0] for pid in provider_ids)
+            best_cf_s  = min(get_provider_ttl(pid)[1] for pid in provider_ids)
+        else:
+            best_app_s, best_cf_s = 86400, 72000  # 24h default for trailers
+        await cache_set(key, {"shorts": page_items}, ttl=best_app_s)
+    else:
+        best_app_s, best_cf_s = 0, 0
 
     return {
-        "ok": bool(page_items),
-        "shorts": page_items,
-        "page": page,
-        "cached": False,
-        "took_ms": int((time.monotonic() - t0) * 1000),
+        "ok":           bool(page_items),
+        "shorts":       page_items,
+        "page":         page,
+        "cached":       False,
+        "took_ms":      int((time.monotonic() - t0) * 1000),
+        "cache_ttl_ms": ttl_to_ms(best_app_s),
+        "cf_max_age_s": best_cf_s,
     }
