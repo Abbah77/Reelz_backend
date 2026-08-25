@@ -4,7 +4,13 @@ api/subtitle.py — POST /api/v1/subtitles
 Auth is OPTIONAL. Guests get subtitles the same as free users.
 
 Request:  { id, type, season, episode, languages }
-Response: { ok, subtitles[] }
+Response envelope:
+  {
+    "ok": true,
+    "data": { "subtitles": [...] },
+    "error": null,
+    "cache_ttl_ms": null
+  }
 """
 from __future__ import annotations
 
@@ -14,6 +20,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from api.auth import verify  # guest-ok
+from api.envelope import ok
 
 router = APIRouter(prefix="/api/v1", tags=["Subtitles"])
 
@@ -71,7 +78,4 @@ async def get_subtitles(
         if s.get("url")
     ]
 
-    return {
-        "ok":        result.get("ok", False),
-        "subtitles": subs,
-    }
+    return ok({"subtitles": subs}, cache_ttl_ms=None)

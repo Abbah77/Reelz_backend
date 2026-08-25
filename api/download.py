@@ -8,32 +8,19 @@ Backend enforces premium-only access server-side.
 Request:
     { "id": "movie:12345", "type": "movie", "season": 0, "episode": 0 }
 
-Response:
-    {
-        "ok": true,
-        "links": [
-            {
-                "label": "1080p",
-                "type": "hls",
-                "url": "https://.../index_1080p.m3u8",
-                "language": "English",
-                "size_bytes": 2147483648,
-                "premium": true
-            },
-            {
-                "label": "720p",
-                "type": "mp4",
-                "url": "https://.../movie_720p.mp4",
-                "language": "English",
-                "size_bytes": 1073741824,
-                "premium": false
-            }
-        ],
-        "expires_at_ms": 1724000000000
-    }
+Response envelope:
+  {
+    "ok": true,
+    "data": {
+      "links": [...],
+      "expires_at_ms": 1724000000000
+    },
+    "error": null,
+    "cache_ttl_ms": null
+  }
 
-Backend owns all provider logic and HLS master resolution.
-App receives ready-to-download URLs (mp4 or quality-specific index.m3u8).
+expires_at_ms is content-level (when download URLs expire) → inside data.
+cache_ttl_ms is null — download URLs must always be freshly resolved.
 """
 from __future__ import annotations
 
@@ -45,6 +32,7 @@ from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
 from api.auth import verify  # GUEST-OK: auth optional
+from api.envelope import ok, err
 
 router = APIRouter(prefix="/api/v1", tags=["Download"])
 
@@ -149,10 +137,16 @@ async def get_download_links(
             "premium":    is_locked,
         })
 
+    if not links:
+        return err("No download links available for this title")
+
     expires_at_ms = int((time.time() + 3600) * 1000)
 
-    return {
-        "ok":            bool(links),
-        "links":         links,
-        "expires_at_ms": expires_at_ms,
-    }
+    # cache_ttl_ms=None — download URLs must never be cached by the app
+    return ok(
+        {
+            "links":         links,
+            "expires_at_ms": expires_at_ms,
+        },
+        cache_ttl_ms=None,
+    )

@@ -5,11 +5,14 @@ POST /auth/google   — exchange Google ID token for our JWT
 POST /auth/refresh  — refresh access token using refresh_token
 POST /auth/sync     — sync watch history (login required)
 
-Schema v3 notes:
+Schema v4 notes:
 - name, email, photo_url are NOT returned by /auth/google or /auth/refresh
   (Google SDK gives these to the app directly on sign-in)
 - /auth/refresh uses Authorization: Bearer <refresh_token>
 - /auth/sync only syncs history — watchlist is 100% local (Room DB)
+
+All responses wrapped in the standard envelope:
+  { "ok": true, "data": {...}, "error": null, "cache_ttl_ms": null }
 """
 from __future__ import annotations
 
@@ -19,6 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from USERS.db import get_db
 from USERS.jwt import verify as verify_jwt, require_user
+from api.envelope import ok
 
 router = APIRouter(prefix="/auth", tags=["Auth"])
 
@@ -52,9 +56,16 @@ async def auth_google(
     """
     Exchange a Google ID token for Reelz access + refresh tokens.
     name, email, photo_url are NOT returned — Google SDK provides them.
+
+    Response data: { user_id, access_token, refresh_token, expires_at_ms,
+                     premium, premium_expires_at_ms }
     """
     from USERS.google_auth import google_sign_in
-    return await google_sign_in(body.id_token, db)
+    result = await google_sign_in(body.id_token, db)
+
+    # google_sign_in returns the flat dict including ok=True — strip ok and wrap
+    result.pop("ok", None)
+    return ok(result, cache_ttl_ms=None)
 
 
 @router.post("/refresh")
@@ -65,6 +76,8 @@ async def refresh_session(
     """
     Use refresh_token to get a new access_token.
     Header: Authorization: Bearer <refresh_token>
+
+    Response data: { access_token, expires_at_ms }
     """
     if not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Bearer token required")
@@ -84,11 +97,13 @@ async def refresh_session(
 
     new_token, expires_at_ms = sign(user.id, user.email)
 
-    return {
-        "ok":            True,
-        "access_token":  new_token,
-        "expires_at_ms": expires_at_ms,
-    }
+    return ok(
+        {
+            "access_token":  new_token,
+            "expires_at_ms": expires_at_ms,
+        },
+        cache_ttl_ms=None,
+    )
 
 
 @router.post("/sync")
@@ -100,6 +115,8 @@ async def sync_user_data(
     """
     Sync watch history to the server for cross-device continuity.
     Watchlist is 100% local (Room DB) — not synced here.
+
+    Response data: {} (empty object — simple acknowledgement)
     """
     from USERS.sync import sync_history
 
@@ -109,4 +126,4 @@ async def sync_user_data(
         history_items=history_dicts,
         db=db,
     )
-    return {"ok": True}
+    return ok({}, cache_ttl_ms=None)

@@ -4,7 +4,13 @@ api/payment.py — Payment routes.
 POST /payment/init    — initialize a Paystack transaction (requires JWT)
 POST /payment/webhook — Paystack webhook (verified by HMAC signature, NOT JWT)
 
-Response: { ok, authorization_url, reference }
+Response envelope:
+  {
+    "ok": true,
+    "data": { "authorization_url": "...", "reference": "..." },
+    "error": null,
+    "cache_ttl_ms": null
+  }
 """
 from __future__ import annotations
 
@@ -15,6 +21,7 @@ from sqlalchemy import select
 from USERS.db import get_db
 from USERS.jwt import require_user
 from USERS.models import User
+from api.envelope import ok
 
 router = APIRouter(prefix="/payment", tags=["Payment"])
 
@@ -27,7 +34,7 @@ async def init_payment(
 ):
     """
     Initialise a Paystack transaction for the authenticated user.
-    Returns { ok, authorization_url, reference }.
+    Response data: { authorization_url, reference }
     """
     result = await db.execute(select(User).where(User.id == user_id))
     user   = result.scalar_one_or_none()
@@ -36,7 +43,10 @@ async def init_payment(
 
     from USERS.payment import init_payment as _init
     data = await _init(user_id=user.id, user_email=user.email, plan=plan, db=db)
-    return data
+
+    # init_payment returns flat dict with ok; strip ok and wrap
+    data.pop("ok", None)
+    return ok(data, cache_ttl_ms=None)
 
 
 @router.post("/webhook")
@@ -51,4 +61,7 @@ async def paystack_webhook(
     """
     body = await request.body()
     from USERS.payment import handle_webhook
-    return await handle_webhook(body=body, signature=x_paystack_signature, db=db)
+    result = await handle_webhook(body=body, signature=x_paystack_signature, db=db)
+
+    result.pop("ok", None)
+    return ok(result, cache_ttl_ms=None)

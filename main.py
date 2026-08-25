@@ -62,7 +62,12 @@ app.add_middleware(
 async def _unhandled(request: Request, exc: Exception):
     return JSONResponse(
         status_code=500,
-        content={"ok": False, "error": "Internal server error"},
+        content={
+            "ok":           False,
+            "data":         None,
+            "error":        "Internal server error",
+            "cache_ttl_ms": None,
+        },
     )
 
 

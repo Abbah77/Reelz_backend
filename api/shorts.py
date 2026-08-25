@@ -4,8 +4,13 @@ api/shorts.py — GET /api/v1/shorts
 Cursor-paginated shorts feed.
 GUEST-accessible: no login required.
 
-Response: { items[], has_more, next_cursor }
-Item:     { id, title, source, url, thumbnail }
+Response envelope:
+  {
+    "ok": true,
+    "data": { "items": [...], "has_more": true, "next_cursor": "..." },
+    "error": null,
+    "cache_ttl_ms": null
+  }
 """
 from __future__ import annotations
 
@@ -16,6 +21,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from api.auth import verify
+from api.envelope import ok
 
 router = APIRouter(prefix="/api/v1", tags=["Shorts"])
 
@@ -64,7 +70,7 @@ async def get_shorts(
 
     items = [
         {
-            "id":        _make_id(s.get("url", ""), i),   # FIX: unique id, not url
+            "id":        _make_id(s.get("url", ""), i),
             "title":     s.get("title", ""),
             "source":    s.get("provider") or s.get("source") or "original",
             "url":       s.get("url", ""),
@@ -74,15 +80,13 @@ async def get_shorts(
         if s.get("url")
     ]
 
-    # FIX: compare page_items length, not raw_shorts length.
-    # Old code: has_more = len(raw_shorts) >= limit
-    # That returned True even when page_items was empty (e.g. page 3 of 30
-    # total items with limit=10), causing the Android client to loop on
-    # empty pages and appear to "buffer forever".
     has_more = len(items) >= limit
 
-    return {
-        "items":       items,
-        "has_more":    has_more,
-        "next_cursor": _encode_cursor(page + 1) if has_more else None,
-    }
+    return ok(
+        {
+            "items":       items,
+            "has_more":    has_more,
+            "next_cursor": _encode_cursor(page + 1) if has_more else None,
+        },
+        cache_ttl_ms=None,
+    )

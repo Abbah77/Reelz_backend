@@ -1,17 +1,20 @@
 """
 api/health.py — Health check routes. No auth required.
+
+Health routes return a minimal envelope consistent with the rest of the API.
 """
 from __future__ import annotations
 
 import time
 from fastapi import APIRouter
+from api.envelope import ok
 
 router = APIRouter(tags=["Health"])
 
 
 @router.get("/health")
 async def health():
-    return {"status": "ok", "ts": int(time.time())}
+    return ok({"status": "ok", "ts": int(time.time())}, cache_ttl_ms=None)
 
 
 @router.get("/health/providers")
@@ -33,11 +36,14 @@ async def provider_health():
     for p in shorts_all():
         providers.append({**await get_stats(p.id), "id": p.id, "name": p.name, "type": "shorts"})
 
-    return {"providers": providers, "cache": await cache_stats()}
+    return ok(
+        {"providers": providers, "cache": await cache_stats()},
+        cache_ttl_ms=None,
+    )
 
 
 @router.post("/health/providers/{provider_id}/reset")
 async def reset_provider(provider_id: str):
     from ENGINE.manager.health import reset
     await reset(provider_id)
-    return {"ok": True, "provider_id": provider_id}
+    return ok({"provider_id": provider_id}, cache_ttl_ms=None)

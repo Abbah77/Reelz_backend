@@ -5,6 +5,9 @@ GET /api/v1/discover — paginated media discovery with filters
 GET /api/v1/genres   — genre list for filter UI
 
 GUEST-accessible: no login required.
+
+All responses wrapped in the standard envelope:
+  { "ok": true, "data": {...}, "error": null, "cache_ttl_ms": ... }
 """
 from __future__ import annotations
 
@@ -14,8 +17,12 @@ from typing import Optional
 
 from fastapi import APIRouter, Depends, Query
 from api.auth import verify
+from api.envelope import ok
 
 router = APIRouter(prefix="/api/v1", tags=["Discover"])
+
+_DISCOVER_TTL_MS = 1_800_000  # 30 min
+_GENRES_TTL_MS   = 86_400_000 # 24 hours
 
 
 def _decode_page(cursor: Optional[str]) -> int:
@@ -33,10 +40,10 @@ def _encode_cursor(page: int) -> str:
 
 @router.get("/discover")
 async def discover(
-    type: str            = Query("movie", description="movie | tv"),
-    genre: Optional[str]     = Query(None, description="Genre ID from /genres"),
-    sort: str            = Query("popularity", description="popularity | rating | newest"),
-    cursor: Optional[str]   = Query(None),
+    type: str             = Query("movie", description="movie | tv"),
+    genre: Optional[str]  = Query(None, description="Genre ID from /genres"),
+    sort: str             = Query("popularity", description="popularity | rating | newest"),
+    cursor: Optional[str] = Query(None),
     limit: int            = Query(20, ge=1, le=50),
     user_id: Optional[str] = Depends(verify),
 ):
@@ -47,17 +54,19 @@ async def discover(
         media_type=type, genre_id=genre,
         sort_by=sort, page=page,
     )
-    results = raw.get("results", [])
-    items   = [normalise_card(r, type) for r in results[:limit]]
-    total   = raw.get("total_pages", 1)
+    results  = raw.get("results", [])
+    items    = [normalise_card(r, type) for r in results[:limit]]
+    total    = raw.get("total_pages", 1)
     has_more = page < total
 
-    return {
-        "items":        items,
-        "has_more":     has_more,
-        "next_cursor":  _encode_cursor(page + 1) if has_more else None,
-        "cache_ttl_ms": 1_800_000,
-    }
+    return ok(
+        {
+            "items":       items,
+            "has_more":    has_more,
+            "next_cursor": _encode_cursor(page + 1) if has_more else None,
+        },
+        cache_ttl_ms=_DISCOVER_TTL_MS,
+    )
 
 
 @router.get("/genres")
@@ -67,6 +76,8 @@ async def get_genres(
 ):
     from CATALOG.tmdb import get_genres
     genres = await get_genres(type)
-    return {
-        "genres": [{"id": str(g["id"]), "name": g["name"]} for g in genres]
-    }
+
+    return ok(
+        {"genres": [{"id": str(g["id"]), "name": g["name"]} for g in genres]},
+        cache_ttl_ms=_GENRES_TTL_MS,
+    )

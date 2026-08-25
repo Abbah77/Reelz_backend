@@ -6,7 +6,19 @@ If a Bearer token is present, backend logs play history server-side.
 If absent, backend serves the same content without logging — must never return 401.
 
 Request:  { id, type, season, episode }
-Response: { ok, streams[], expires_at_ms }
+Response envelope:
+  {
+    "ok": true,
+    "data": {
+      "streams": [...],
+      "expires_at_ms": 1724000000000
+    },
+    "error": null,
+    "cache_ttl_ms": null
+  }
+
+expires_at_ms is content-level metadata (when stream links expire) → inside data.
+cache_ttl_ms is null here — stream URLs must always be freshly resolved.
 """
 from __future__ import annotations
 
@@ -16,7 +28,8 @@ from typing import Optional
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 
-from api.auth import verify  # guest-ok: accepts JWT, legacy token, or no credentials
+from api.auth import verify
+from api.envelope import ok, err
 
 router = APIRouter(prefix="/api/v1", tags=["Stream"])
 
@@ -83,7 +96,7 @@ async def resolve_stream(
             "url":       url,
             "type":      stream_type,
             "headers":   s.get("headers") or {},
-            "subtitles": [],   # subtitles resolved via POST /api/v1/subtitles
+            "subtitles": [],  # subtitles resolved via POST /api/v1/subtitles
         })
 
     # Deduplicate by name — keep first occurrence
@@ -104,11 +117,16 @@ async def resolve_stream(
             "subtitles": [],
         }]
 
-    ok = bool(unique_streams)
+    if not unique_streams:
+        return err("No streams available for this title")
+
     expires_at_ms = int((time.time() + 3600) * 1000)  # 1 hour from now
 
-    return {
-        "ok":            ok,
-        "streams":       unique_streams,
-        "expires_at_ms": expires_at_ms,
-    }
+    # cache_ttl_ms=None — stream URLs must never be cached by the app
+    return ok(
+        {
+            "streams":       unique_streams,
+            "expires_at_ms": expires_at_ms,
+        },
+        cache_ttl_ms=None,
+    )
