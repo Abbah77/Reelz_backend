@@ -1,58 +1,36 @@
 """
-api/stream.py — POST /api/v1/stream
-
-Auth is OPTIONAL. Guests and free users get the same streams.
-If a Bearer token is present, backend logs play history server-side.
-If absent, backend serves the same content without logging — must never return 401.
-
-Request:  { id, type, season, episode }
-Response envelope:
-  {
-    "ok": true,
-    "data": {
-      "streams": [...],
-      "expires_at_ms": 1724000000000
-    },
-    "error": null,
-    "cache_ttl_ms": null
-  }
-
-expires_at_ms is content-level metadata (when stream links expire) → inside data.
-cache_ttl_ms is null here — stream URLs must always be freshly resolved.
+api/stream.py — Stream.
+cache_ttl_ms: None — never cache stream URLs
 """
 from __future__ import annotations
-
 import time
 from typing import Optional
-
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Response
 from pydantic import BaseModel, Field
-
 from api.auth import verify
 from api.envelope import ok, err
+from api.cache_headers import set_cache
 
 router = APIRouter(prefix="/api/v1", tags=["Stream"])
 
 
 class StreamRequestBody(BaseModel):
-    id:      str = Field(..., description="Media ID")
-    type:    str = Field(..., description="movie | tv")
+    id:      str = Field(...)
+    type:    str = Field(...)
     season:  int = Field(0, ge=0)
     episode: int = Field(0, ge=0)
 
 
-def _parse_id(media_id: str) -> tuple[Optional[str], Optional[int]]:
+def _parse_id(media_id):
     parts = media_id.split(":", 1)
     if len(parts) == 2:
-        try:
-            return None, int(parts[1])
-        except ValueError:
-            pass
+        try: return None, int(parts[1])
+        except ValueError: pass
     return None, None
 
 
 class _EngineRequest:
-    def __init__(self, body: StreamRequestBody, tmdb_id: int):
+    def __init__(self, body, tmdb_id):
         self.tmdb_id = tmdb_id
         self.type    = body.type
         self.title   = ""
@@ -65,68 +43,55 @@ class _EngineRequest:
 @router.post("/stream")
 async def resolve_stream(
     req: StreamRequestBody,
-    fresh: int = Query(0, description="1 = skip cache"),
-    warp:  str = Query("off"),
-    user_id: Optional[str] = Depends(verify),  # GUEST-OK
+    response: Response,
+    fresh: int = Query(0),
+    warp: str = Query("off"),
+    user_id: Optional[str] = Depends(verify),
 ):
     _, tmdb_id = _parse_id(req.id)
     if tmdb_id is None:
         from fastapi import HTTPException
-        raise HTTPException(status_code=400, detail="Invalid id format. Use 'movie:<tmdb_id>' or 'tv:<tmdb_id>'")
-
-    engine_req = _EngineRequest(req, tmdb_id)
+        raise HTTPException(status_code=400, detail="Invalid id format.")
 
     from ENGINE.manager.stream import get_streams
-    result = await get_streams(engine_req, fresh=bool(fresh), warp_mode=warp)
+    result = await get_streams(_EngineRequest(req, tmdb_id), fresh=bool(fresh), warp_mode=warp)
 
     raw_streams = result.get("streams", [])
-    best        = result.get("stream")
+    best = result.get("stream")
     if not best and raw_streams:
         best = raw_streams[0]
 
-    # Build schema-compliant streams array: one entry per language track
     streams = []
+    seen = set()
     for s in raw_streams:
         url = s.get("url", "")
-        if not url:
-            continue
-        stream_type = "hls" if s.get("type") in ("m3u8", "hls") else "mp4"
+        if not url: continue
+        name = s.get("language") or s.get("quality") or "English"
+        if name in seen: continue
+        seen.add(name)
         streams.append({
-            "name":      s.get("language") or s.get("quality") or "English",
+            "name":      name,
             "url":       url,
-            "type":      stream_type,
+            "type":      "hls" if s.get("type") in ("m3u8", "hls") else "mp4",
             "headers":   s.get("headers") or {},
-            "subtitles": [],  # subtitles resolved via POST /api/v1/subtitles
+            "subtitles": [],
         })
 
-    # Deduplicate by name — keep first occurrence
-    seen = set()
-    unique_streams = []
-    for s in streams:
-        if s["name"] not in seen:
-            seen.add(s["name"])
-            unique_streams.append(s)
-
-    if not unique_streams and best:
-        stream_type = "hls" if best.get("type") in ("m3u8", "hls") else "mp4"
-        unique_streams = [{
-            "name":      best.get("language") or best.get("quality") or "English",
+    if not streams and best:
+        streams = [{
+            "name":      best.get("language") or "English",
             "url":       best.get("url", ""),
-            "type":      stream_type,
+            "type":      "hls" if best.get("type") in ("m3u8", "hls") else "mp4",
             "headers":   best.get("headers") or {},
             "subtitles": [],
         }]
 
-    if not unique_streams:
+    if not streams:
+        set_cache(response, None)
         return err("No streams available for this title")
 
-    expires_at_ms = int((time.time() + 3600) * 1000)  # 1 hour from now
-
-    # cache_ttl_ms=None — stream URLs must never be cached by the app
-    return ok(
-        {
-            "streams":       unique_streams,
-            "expires_at_ms": expires_at_ms,
-        },
-        cache_ttl_ms=None,
-    )
+    set_cache(response, None)  # never cache stream URLs
+    return ok({
+        "streams":       streams,
+        "expires_at_ms": int((time.time() + 3600) * 1000),
+    }, cache_ttl_ms=None)

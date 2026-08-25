@@ -1,31 +1,22 @@
 """
 api/config_route.py — GET /config
-
-Returns AppConfigDto consumed by the Android app on every launch.
-No auth required — the app fetches this before it has a token.
-Response is wrapped in the standard envelope and cached at the HTTP level.
+cache_ttl_ms: 3_600_000 (1 hour) — Cloudflare + app both cache for 1 hour
 """
 from __future__ import annotations
-
-from fastapi import APIRouter
-from fastapi.responses import JSONResponse
-
+from fastapi import APIRouter, Response
 from config import get_settings
 from api.envelope import ok
+from api.cache_headers import set_cache
 
 router = APIRouter(tags=["Config"])
 _s = get_settings()
-
-_CONFIG_TTL_MS = 3_600_000  # 1 hour
+_TTL = 3_600_000  # 1 hour
 
 
 @router.get("/config")
-async def get_config():
-    """
-    App configuration gate. The Android app calls this first on every launch.
-    Controls feature flags, ad unit IDs, premium pricing, and app versioning.
-    """
-    payload = ok(
+async def get_config(response: Response):
+    set_cache(response, _TTL)
+    return ok(
         data={
             "version":                 _s.app_version,
             "min_app_version":         _s.min_app_version,
@@ -64,10 +55,5 @@ async def get_config():
                 },
             },
         },
-        cache_ttl_ms=_CONFIG_TTL_MS,
+        cache_ttl_ms=_TTL,
     )
-
-    response = JSONResponse(content=payload)
-    # Cache for 1 hour at CDN/browser level; stale-while-revalidate 10 min
-    response.headers["Cache-Control"] = "no-store"
-    return response
