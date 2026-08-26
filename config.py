@@ -118,8 +118,12 @@ class Settings(BaseSettings):
     # Premium pricing (in kobo / minor currency unit)
     premium_enabled: bool = False
     premium_monthly_price: int = 0
+    # Yearly price — set in .env; defaults to 10× monthly if absent.
+    premium_yearly_price: int = 0
     paystack_monthly_url: str = ""
     paystack_yearly_url: str = ""
+    # Optional note shown below subscribe buttons (e.g. "Cancel anytime").
+    premium_payment_note: str = ""
 
     # Ads config
     ads_enabled: bool = False

@@ -31,8 +31,12 @@ async def get_config(response: Response):
             "premium": {
                 "enabled":              _s.premium_enabled,
                 "monthly_price":        _s.premium_monthly_price,
+                # Yearly price — set PREMIUM_YEARLY_PRICE in .env; falls back to 10× monthly.
+                "yearly_price":         _s.premium_yearly_price if _s.premium_yearly_price > 0 else _s.premium_monthly_price * 10,
                 "paystack_monthly_url": _s.paystack_monthly_url,
                 "paystack_yearly_url":  _s.paystack_yearly_url,
+                # Optional note below subscribe buttons (e.g. "Cancel anytime").
+                "payment_note":         _s.premium_payment_note,
             },
             "ads": {
                 "enabled":          _s.ads_enabled,

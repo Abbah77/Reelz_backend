@@ -13,17 +13,6 @@ router = APIRouter(prefix="/auth", tags=["Auth"])
 class GoogleAuthBody(BaseModel):
     id_token: str = Field(...)
 
-class HistorySyncItem(BaseModel):
-    id: str = ""
-    season: int = 0
-    episode: int = 0
-    position_ms: int = 0
-    duration_ms: int = 0
-    watched_at: int = 0
-
-class SyncBody(BaseModel):
-    history: list[HistorySyncItem] = Field(default_factory=list)
-
 
 @router.post("/google")
 async def auth_google(body: GoogleAuthBody, response: Response, db: AsyncSession = Depends(get_db)):
@@ -51,11 +40,3 @@ async def refresh_session(response: Response, authorization: str = Header(...), 
     new_token, expires_at_ms = sign(user.id, user.email)
     set_cache(response, None)
     return ok({"access_token": new_token, "expires_at_ms": expires_at_ms}, cache_ttl_ms=None)
-
-
-@router.post("/sync")
-async def sync_user_data(body: SyncBody, response: Response, user_id: str = Depends(require_user), db: AsyncSession = Depends(get_db)):
-    from USERS.sync import sync_history
-    await sync_history(user_id=user_id, history_items=[i.model_dump() for i in body.history], db=db)
-    set_cache(response, None)
-    return ok({}, cache_ttl_ms=None)
