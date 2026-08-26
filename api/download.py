@@ -60,9 +60,13 @@ async def get_download_links(
     for link in result.get("links", []):
         url   = link.get("url", "")
         label = link.get("label", "").strip()
-        if not url or not label:
-            # Skip entries with no URL or no quality label — never synthesise "Auto"
+        if not url:
             continue
+        if not label:
+            # Infer from URL; fall back to "1080p" — never synthesise "Auto"
+            import re as _re
+            m = _re.search(r"(2160|1080|720|480|360|240)p?", url, _re.I)
+            label = (m.group(1) + "p") if m else "1080p"
         res = _res_height(label)
         links.append({
             "label":      label,

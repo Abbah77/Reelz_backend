@@ -53,7 +53,10 @@ async def _collect_from_download_providers(data: LinkData) -> list[dict]:
                 continue
             lbl = (item.quality or "").strip()
             if not lbl:
-                continue  # skip unlabelled entries — never synthesise "Auto"
+                # Infer from URL; fall back to "1080p" so the link is never silently dropped
+                import re as _re
+                m = _re.search(r"(2160|1080|720|480|360|240)p?", item.url, _re.I)
+                lbl = (m.group(1) + "p") if m else "1080p"
             local.append({
                 "provider":      p.name,
                 "provider_id":   p.id,
@@ -93,9 +96,12 @@ async def _collect_from_stream_providers(data: LinkData) -> list[dict]:
             if not s.url or s.type == "iframe":
                 continue
             if s.type == "mp4":
+                # Use provider quality label; if absent, infer from URL, else use "1080p"
+                import re as _re
                 mp4_lbl = (s.quality or "").strip()
                 if not mp4_lbl:
-                    continue  # skip unlabelled mp4 — never synthesise "Auto"
+                    m = _re.search(r"(2160|1080|720|480|360|240)p?", s.url, _re.I)
+                    mp4_lbl = (m.group(1) + "p") if m else "1080p"
                 local.append({
                     "provider":      p.name,
                     "provider_id":   p.id,

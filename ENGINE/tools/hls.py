@@ -138,9 +138,16 @@ async def resolve_master(
         content = resp.text
 
         if not _is_master(content):
-            # Already a specific quality playlist — return as-is with unknown quality
-            # Non-master playlist — unknown quality, skip rather than label "Auto"
-        return []
+            # Already a media playlist (single quality) — infer label from URL path.
+            # e.g. "…/1080p/index.m3u8" or "…index_720p.m3u8"
+            import re as _re
+            m = _re.search(r"(2160|1080|720|480|360|240)p?", url, _re.I)
+            label = m.group(1) + "p" if m else None
+            if not label:
+                # No resolution in URL — estimate from a HEAD/content-length call is
+                # expensive; just skip so we don't show a phantom quality.
+                return []
+            return [{"quality": label, "url": url, "bandwidth": 0, "resolution": None}]
 
         return _parse_master(content, url)
 
@@ -159,7 +166,7 @@ async def resolve_master_from_stream(
     If type is 'm3u8'/'hls': resolves master → quality list.
     """
     if stream_type in ("mp4", "mkv"):
-        # MP4/MKV without a quality label — caller must supply quality from provider metadata.
-        # Return empty so the caller uses the label from the provider result instead.
-        return []
+        # MP4/MKV — return as a single-item list so the caller can attach its own label.
+        # Quality label comes from the provider result (item.quality), not from here.
+        return [{"quality": "", "url": stream_url, "bandwidth": 0, "resolution": None}]
     return await resolve_master(stream_url, headers=headers)
