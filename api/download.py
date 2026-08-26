@@ -74,7 +74,7 @@ async def get_download_links(
             "url":        url,
             "language":   link.get("language") or "English",
             "size_bytes": int(link.get("size_bytes") or 0),
-            "premium":    res >= 720 and not is_premium,  # TEST: 720p+1080p locked
+            "premium":    res >= 1080 and not is_premium,
         })
 
     if not links:
