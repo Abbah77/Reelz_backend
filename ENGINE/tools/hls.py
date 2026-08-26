@@ -139,7 +139,8 @@ async def resolve_master(
 
         if not _is_master(content):
             # Already a specific quality playlist — return as-is with unknown quality
-            return [{"quality": "Auto", "url": url, "bandwidth": 0, "resolution": None}]
+            # Non-master playlist — unknown quality, skip rather than label "Auto"
+        return []
 
         return _parse_master(content, url)
 
@@ -158,5 +159,7 @@ async def resolve_master_from_stream(
     If type is 'm3u8'/'hls': resolves master → quality list.
     """
     if stream_type in ("mp4", "mkv"):
-        return [{"quality": "Auto", "url": stream_url, "bandwidth": 0, "resolution": None}]
+        # MP4/MKV without a quality label — caller must supply quality from provider metadata.
+        # Return empty so the caller uses the label from the provider result instead.
+        return []
     return await resolve_master(stream_url, headers=headers)

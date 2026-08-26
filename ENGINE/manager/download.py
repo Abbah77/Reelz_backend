@@ -51,10 +51,13 @@ async def _collect_from_download_providers(data: LinkData) -> list[dict]:
         for item in result.downloads:
             if not item.url:
                 continue
+            lbl = (item.quality or "").strip()
+            if not lbl:
+                continue  # skip unlabelled entries — never synthesise "Auto"
             local.append({
                 "provider":      p.name,
                 "provider_id":   p.id,
-                "label":         item.quality or "Auto",
+                "label":         lbl,
                 "type":          item.type,
                 "url":           item.url,
                 "language":      item.language,
@@ -90,10 +93,13 @@ async def _collect_from_stream_providers(data: LinkData) -> list[dict]:
             if not s.url or s.type == "iframe":
                 continue
             if s.type == "mp4":
+                mp4_lbl = (s.quality or "").strip()
+                if not mp4_lbl:
+                    continue  # skip unlabelled mp4 — never synthesise "Auto"
                 local.append({
                     "provider":      p.name,
                     "provider_id":   p.id,
-                    "label":         s.quality or "Auto",
+                    "label":         mp4_lbl,
                     "type":          "mp4",
                     "url":           s.url,
                     "language":      "English",

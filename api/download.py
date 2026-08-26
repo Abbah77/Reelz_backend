@@ -58,12 +58,14 @@ async def get_download_links(
 
     links = []
     for link in result.get("links", []):
-        url = link.get("url", "")
-        if not url:
+        url   = link.get("url", "")
+        label = link.get("label", "").strip()
+        if not url or not label:
+            # Skip entries with no URL or no quality label — never synthesise "Auto"
             continue
-        res = _res_height(link.get("label", ""))
+        res = _res_height(label)
         links.append({
-            "label":      link.get("label") or "Auto",
+            "label":      label,
             "type":       link.get("type") or "mp4",
             "url":        url,
             "language":   link.get("language") or "English",
