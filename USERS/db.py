@@ -35,11 +35,14 @@ class Base(DeclarativeBase):
 
 
 async def init_db() -> None:
-    """Create all tables. Called at app startup."""
+    """Create tables if they don't already exist. Safe to call on every startup."""
     # Import models so they register with Base.metadata
     import USERS.models  # noqa: F401
     async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+        # checkfirst=True: skip tables that already exist instead of raising.
+        # Re-deploys and restarts never crash here.
+        # For schema migrations (adding/altering columns) use Alembic.
+        await conn.run_sync(lambda c: Base.metadata.create_all(c, checkfirst=True))
 
 
 async def get_db():
