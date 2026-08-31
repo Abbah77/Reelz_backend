@@ -89,6 +89,9 @@ from api.download import router as download_router
 from api.subtitle import router as subtitle_router
 from api.shorts import router as shorts_router
 
+# AI Insights
+from api.insights import router as insights_router
+
 # Auth + Users
 from api.user_auth import router as user_auth_router
 
@@ -105,6 +108,7 @@ app.include_router(stream_router)
 app.include_router(download_router)
 app.include_router(subtitle_router)
 app.include_router(shorts_router)
+app.include_router(insights_router)
 app.include_router(user_auth_router)
 app.include_router(payment_router)
 
