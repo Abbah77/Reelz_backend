@@ -37,6 +37,8 @@ async def get_subtitles(req, *, fresh: bool = False) -> dict:
         tmdb_id=req.tmdb_id, type=req.type, title="",
         imdb_id=req.imdb_id, season=req.season, episode=req.episode,
     )
+    # Attach duration_ms hint so providers can fingerprint the exact file
+    data.duration_ms = getattr(req, "duration_ms", 0)  # type: ignore[attr-defined]
 
     providers = [p for p in get_all() if await should_run(p.id)]
     subs = []
@@ -51,12 +53,21 @@ async def get_subtitles(req, *, fresh: bool = False) -> dict:
             if not sub.url or sub.url in seen:
                 continue
             seen.add(sub.url)
+            # Infer format from URL extension if provider didn't set it
+            fmt = getattr(sub, "format", "") or ""
+            if not fmt:
+                for ext in ("vtt", "srt", "ass", "ssa", "sub", "sbv", "lrc"):
+                    if f".{ext}" in sub.url.lower():
+                        fmt = ext
+                        break
+                else:
+                    fmt = "srt"
             local.append({
                 "provider": p.name,
                 "language": sub.language,
-                "label": sub.label or p.name,
-                "url": sub.url,
-                "format": sub.format,
+                "label":    sub.label or p.name,
+                "url":      sub.url,
+                "format":   fmt,
             })
         outcome = "found" if local else "failed" if isinstance(result, TimedOut) else "empty"
         await record(p.id, outcome, ms)
