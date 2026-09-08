@@ -16,7 +16,7 @@ import re
 
 from ENGINE.providers.base import Provider, LinkData, Result, Stream
 from ENGINE.tools.http import get_client, UA
-from ENGINE.tools.flaresolverr import solve_cloudflare
+from ENGINE.tools.scraper import parse, cf_get
 from ENGINE.tools.warp import warp_proxy
 
 _BASE = "https://watchanimeworld.net"
@@ -35,8 +35,7 @@ def _animetitles(data) -> list[str]:
 
 
 async def _flare_html(url: str, use_warp: bool = False) -> str | None:
-    html, _, _ = await solve_cloudflare(url, use_warp=use_warp)
-    return html
+    return await cf_get(url, use_warp=use_warp)
 
 
 class R017Provider(Provider):
@@ -58,8 +57,7 @@ class R017Provider(Provider):
                 html = await _flare_html(f"{_BASE}/?s={q}", use_warp=True)
                 if not html:
                     continue
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html, "html.parser")
+                soup = parse(html)
                 for a in soup.select("a[href]"):
                     href = a.get("href", "")
                     m = re.search(r"/(series|movies)/([^/]+)/?$", href)
@@ -98,8 +96,7 @@ class R017Provider(Provider):
             if not content_html:
                 return result
 
-            from bs4 import BeautifulSoup
-            csoup = BeautifulSoup(content_html, "html.parser")
+            csoup = parse(content_html)
 
             if episode is None:
                 # Movie: find the first player iframe directly
@@ -147,8 +144,8 @@ class R017Provider(Provider):
                     pass
 
                 if not result.streams:
-                    # FlareSolverr+WARP fallback
-                    zhtml, _, _ = await solve_cloudflare(embed, use_warp=True)
+                    # cf_get WARP fallback
+                    zhtml = await cf_get(embed, use_warp=True)
                     if zhtml:
                         m3u8_m = re.search(r'(https?://[^"\'\\s]+\.m3u8[^"\'\\s]*)', zhtml, re.I)
                         if m3u8_m:

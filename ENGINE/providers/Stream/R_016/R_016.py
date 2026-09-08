@@ -81,8 +81,8 @@ class R016Provider(Provider):
             cards: list[dict] = []
             for q in queries:
                 html = (await client.get(f"{_BASE}/?s={q}", headers=headers, timeout=15)).text
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html, "html.parser")
+                from ENGINE.tools.scraper import parse
+                soup = parse(html)
                 seen: set[str] = set()
                 for a in soup.select('a[href*="/anime/"]'):
                     url = (a.get("href") or "").split("#")[0]
@@ -124,8 +124,8 @@ class R016Provider(Provider):
 
             for pick in candidates[:5]:
                 anime_html = (await client.get(pick["url"], headers={"User-Agent": UA, "Referer": f"{_BASE}/"}, timeout=15)).text
-                from bs4 import BeautifulSoup
-                asoup = BeautifulSoup(anime_html, "html.parser")
+                from ENGINE.tools.scraper import parse
+                asoup = parse(anime_html)
                 ep_url = ""
                 for a in asoup.select('a[href*="-episode-"]'):
                     href = (a.get("href") or "").split("#")[0]

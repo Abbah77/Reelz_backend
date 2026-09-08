@@ -17,7 +17,7 @@ import re
 
 from ENGINE.providers.base import Provider, LinkData, Result, Stream, Subtitle
 from ENGINE.tools.http import get_client, UA
-from ENGINE.tools.flaresolverr import solve_cloudflare
+from ENGINE.tools.scraper import parse, fetch_soup_cf
 
 _BASE = "https://anineko.to"
 
@@ -64,9 +64,12 @@ def _get_and_unpack(js: str) -> str:
         return js
 
 
-async def _fetch_flare(url: str) -> str | None:
-    html, _, _ = await solve_cloudflare(url)
-    return html
+# fetch_soup_cf from scraper wraps FlareSolverr; _fetch_flare_html is a thin wrapper below
+async def _fetch_flare_html(url: str) -> str | None:
+    soup = await fetch_soup_cf(url)
+    if soup is None:
+        return None
+    return str(soup)
 
 
 async def _resolve_embed(embed_url: str) -> str | None:
@@ -105,11 +108,10 @@ class R015Provider(Provider):
 
             cards: list[dict] = []
             for q in queries:
-                html = await _fetch_flare(f"{_BASE}/browser?keyword={q}")
+                html = await _fetch_flare_html(f"{_BASE}/browser?keyword={q}")
                 if not html:
                     continue
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html, "html.parser")
+                soup = parse(html)
                 seen: set[str] = set()
                 for a in soup.select('a[href*="/watch/"]'):
                     href = a.get("href", "")
@@ -136,12 +138,11 @@ class R015Provider(Provider):
             if not pick:
                 return result
 
-            ep_html = await _fetch_flare(f"{_BASE}/watch/{pick['slug']}/ep-{episode}")
+            ep_html = await _fetch_flare_html(f"{_BASE}/watch/{pick['slug']}/ep-{episode}")
             if not ep_html:
                 return result
 
-            from bs4 import BeautifulSoup
-            ep_soup = BeautifulSoup(ep_html, "html.parser")
+            ep_soup = parse(ep_html)
             embeds: list[dict] = []
             seen_urls: set[str] = set()
             for el in ep_soup.select("[data-video]"):

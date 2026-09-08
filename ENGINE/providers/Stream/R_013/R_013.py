@@ -98,8 +98,8 @@ class R013Provider(Provider):
                     f"{_BASE}/search/?do=search&subaction=search&q={q}",
                     headers=_HEADERS, timeout=15,
                 )
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(r.text, "html.parser")
+                from ENGINE.tools.scraper import parse
+                soup = parse(r.text)
                 for item in soup.select(".b-content__inline_item"):
                     a = item.select_one(".b-content__inline_item-link a")
                     if not a:
@@ -141,8 +141,8 @@ class R013Provider(Provider):
 
             # 2) Film page -> translators
             page_r = (await client.get(best["url"], headers=_HEADERS, timeout=15)).text
-            from bs4 import BeautifulSoup
-            page_soup = BeautifulSoup(page_r, "html.parser")
+            from ENGINE.tools.scraper import parse
+            page_soup = parse(page_r)
             translators = [
                 {"id": el.get("data-translator_id", ""), "name": el.get_text(strip=True) or "HDRezka"}
                 for el in page_soup.select("#translators-list li[data-translator_id]")

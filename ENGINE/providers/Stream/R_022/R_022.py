@@ -1,7 +1,14 @@
 """
-ENGINE/providers/Stream/R-022/R_022.py — RogMovies (Indian content)
+ENGINE/providers/Stream/R_022/R_022.py — RogMovies (Indian content)
 
 /search.php?q=<imdbId|title> -> JSON -> permalink -> V-Cloud/G-Direct -> stream.
+
+Type: m3u8 | mp4
+Flow:
+  1. cf_get /search.php -> JSON -> match by imdb_id or title keywords
+  2. cf_get permalink -> scrape V-Cloud/G-Direct sources
+  3. For TV: navigate episode pages; for each source cf_get -> extract_media_urls
+
 Ported from Streamplay's RogMoviesProvider.
 """
 from __future__ import annotations
@@ -10,9 +17,8 @@ import json
 import re
 
 from ENGINE.providers.base import Provider, LinkData, Result, Stream
-from ENGINE.tools.http import get_client, UA
 from ENGINE.tools.domains import get_domain
-from ENGINE.tools.flaresolverr import solve_cloudflare
+from ENGINE.tools.scraper import parse, cf_get, extract_media_urls
 
 _VEGA_HEADERS = {
     "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
@@ -27,32 +33,6 @@ def _norm(s: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", (s or "").lower())
 
 
-async def _cf_get(url: str, referer: str = "") -> str | None:
-    try:
-        client = await get_client()
-        h = {**_VEGA_HEADERS}
-        if referer:
-            h["Referer"] = referer
-        r = await client.get(url, headers=h, timeout=20)
-        if r.status_code < 400 and not re.search(r"just a moment", r.text, re.I):
-            return r.text
-    except Exception:
-        pass
-    html, _, _ = await solve_cloudflare(url)
-    return html
-
-
-async def _load_extractor(source: str) -> list[Stream]:
-    html = await _cf_get(source)
-    if not html:
-        return []
-    streams: list[Stream] = []
-    for m in re.finditer(r'(https?://[^"\'<>\s]+\.(?:m3u8|mp4)[^"\'<>\s]*)', html):
-        url = m.group(1)
-        streams.append(Stream(url=url, type="m3u8" if ".m3u8" in url else "mp4", server="R-022 RogMovies"))
-    return streams
-
-
 class R022Provider(Provider):
     id = "R-022"
     name = "RogMovies"
@@ -65,7 +45,7 @@ class R022Provider(Provider):
                 return result
 
             async def search(query: str) -> list[dict]:
-                raw = await _cf_get(f"{api}/search.php?q={query}", referer=api)
+                raw = await cf_get(f"{api}/search.php?q={query}", referer=api, extra_headers=_VEGA_HEADERS)
                 if not raw:
                     return []
                 try:
@@ -90,22 +70,21 @@ class R022Provider(Provider):
             if not permalink:
                 return result
 
-            main_html = await _cf_get(api + permalink, referer=api)
+            main_html = await cf_get(api + permalink, referer=api, extra_headers=_VEGA_HEADERS)
             if not main_html:
                 return result
 
-            from bs4 import BeautifulSoup
-            soup = BeautifulSoup(main_html, "html.parser")
+            soup = parse(main_html)
             sources: set[str] = set()
 
             if data.season is None:
                 for btn in soup.select("button.dwd-button"):
                     h = btn.parent.get("href") if btn.parent else None
                     if h:
-                        page_html = await _cf_get(h, referer=api)
+                        page_html = await cf_get(h, referer=api, extra_headers=_VEGA_HEADERS)
                         if not page_html:
                             continue
-                        ps = BeautifulSoup(page_html, "html.parser")
+                        ps = parse(page_html)
                         for btn2 in ps.select("button.btn"):
                             if re.search(r"V-Cloud|G-Direct", btn2.get_text(), re.I):
                                 h2 = btn2.parent.get("href") if btn2.parent else None
@@ -129,10 +108,10 @@ class R022Provider(Provider):
                 ep_re = re.compile(rf"Episodes?\s*:\s*{data.episode}", re.I)
                 ep_sources: set[str] = set()
                 for src in sources:
-                    page_html = await _cf_get(src, referer=api)
+                    page_html = await cf_get(src, referer=api, extra_headers=_VEGA_HEADERS)
                     if not page_html:
                         continue
-                    ps = BeautifulSoup(page_html, "html.parser")
+                    ps = parse(page_html)
                     for h4 in ps.select("h4"):
                         if ep_re.search(h4.get_text()):
                             sib = h4.find_next_sibling()
@@ -146,8 +125,14 @@ class R022Provider(Provider):
                 sources = ep_sources
 
             for src in sources:
-                for s in await _load_extractor(src):
-                    result.streams.append(s)
+                src_html = await cf_get(src, referer=api, extra_headers=_VEGA_HEADERS)
+                if src_html:
+                    for url in extract_media_urls(src_html):
+                        result.streams.append(Stream(
+                            url=url,
+                            type="m3u8" if ".m3u8" in url else "mp4",
+                            server="R-022 RogMovies",
+                        ))
         except Exception:
             pass
         return result

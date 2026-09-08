@@ -15,7 +15,7 @@ import re
 
 from ENGINE.providers.base import Provider, LinkData, Result, Stream, Subtitle
 from ENGINE.tools.http import get_client, UA
-from ENGINE.tools.flaresolverr import solve_cloudflare
+from ENGINE.tools.scraper import parse, cf_get
 
 _BASE = "https://anizone.to"
 
@@ -36,21 +36,7 @@ def _season_score(title: str, want_season: int, want_year: int | None) -> int:
     return score
 
 
-def _looks_challenged(html: str) -> bool:
-    return bool(re.search(r"just a moment|cf-browser-verification|__cf_chl|checking your browser", html, re.I))
-
-
-async def _fetch_html(url: str) -> str | None:
-    try:
-        client = await get_client()
-        r = await client.get(url, headers={"User-Agent": UA}, timeout=12)
-        if r.status_code == 200 and r.text and not _looks_challenged(r.text):
-            return r.text
-    except Exception:
-        pass
-    # FlareSolverr fallback
-    html, _, _ = await solve_cloudflare(url)
-    return html
+# cf_get from scraper handles plain HTTP -> FlareSolverr fallback automatically
 
 
 def _anime_title_of_ep_page(html: str) -> str:
@@ -85,11 +71,10 @@ class R014Provider(Provider):
 
             candidates: list[str] = []
             for q in queries:
-                html = await _fetch_html(f"{_BASE}/anime?search={q}")
+                html = await cf_get(f"{_BASE}/anime?search={q}")
                 if not html:
                     continue
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html, "html.parser")
+                soup = parse(html)
                 for a in soup.select('a[href*="/anime/"]'):
                     href = a.get("href", "")
                     if not re.search(r"/anime/[a-z0-9]+$", href, re.I):
@@ -106,11 +91,10 @@ class R014Provider(Provider):
             want_str = f"{data.title} {data.org_title or ''}"
 
             async def probe(anime_href: str) -> dict | None:
-                watch_html = await _fetch_html(f"{anime_href}/{episode}")
+                watch_html = await cf_get(f"{anime_href}/{episode}")
                 if not watch_html:
                     return None
-                from bs4 import BeautifulSoup
-                ws = BeautifulSoup(watch_html, "html.parser")
+                ws = parse(watch_html)
                 mp = ws.find("media-player")
                 src = mp.get("src") if mp else None
                 if not src:
@@ -125,8 +109,7 @@ class R014Provider(Provider):
                 return result
 
             chosen = max(scored, key=lambda p: p["score"])
-            from bs4 import BeautifulSoup
-            ws = BeautifulSoup(chosen["html"], "html.parser")
+            ws = parse(chosen["html"])
             for track in ws.select('track[kind="subtitles"]'):
                 track_url = track.get("src")
                 label = track.get("label") or track.get("srclang")

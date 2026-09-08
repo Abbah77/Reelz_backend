@@ -1,7 +1,14 @@
 """
-ENGINE/providers/Stream/R-019/R_019.py — HdHub4u (Indian content)
+ENGINE/providers/Stream/R_019/R_019.py — HdHub4u (Indian content)
 
 Typesense search (search.pingora.fyi) -> post page -> quality links -> stream.
+
+Type: m3u8 | mp4
+Flow:
+  1. Typesense search by title -> permalink -> IMDB-id narrowing (optional)
+  2. cf_get post page -> quality anchor links -> get_redirect_link
+  3. cf_get resolved link -> extract_media_urls -> Stream objects
+
 Ported from Streamplay's HdHub4uProvider.
 """
 from __future__ import annotations
@@ -12,7 +19,7 @@ from ENGINE.providers.base import Provider, LinkData, Result, Stream
 from ENGINE.tools.http import get_client, UA
 from ENGINE.tools.domains import get_domain
 from ENGINE.tools.bypass import get_redirect_link
-from ENGINE.tools.flaresolverr import solve_cloudflare
+from ENGINE.tools.scraper import parse, cf_get, extract_media_urls
 
 _QUALITY_RE = re.compile(r"480|720|1080|2160|4K", re.I)
 _SEARCH_URL = (
@@ -24,34 +31,6 @@ _SEARCH_URL = (
 
 def _norm_alphanum(s: str) -> str:
     return re.sub(r"[^a-z0-9]", "", (s or "").lower())
-
-
-async def _cf_get(url: str) -> str | None:
-    try:
-        client = await get_client()
-        r = await client.get(url, headers={"User-Agent": UA}, timeout=20)
-        if r.status_code < 400 and not re.search(r"just a moment", r.text, re.I):
-            return r.text
-    except Exception:
-        pass
-    html, _, _ = await solve_cloudflare(url)
-    return html
-
-
-async def _load_extractor(source: str) -> list[Stream]:
-    """Try to pull a direct m3u8/mp4 from a hosting page."""
-    streams: list[Stream] = []
-    html = await _cf_get(source)
-    if not html:
-        return streams
-    for m in re.finditer(r'(https?://[^"\'<>\s]+\.(?:m3u8|mp4)[^"\'<>\s]*)', html):
-        url = m.group(1)
-        streams.append(Stream(
-            url=url,
-            type="m3u8" if ".m3u8" in url else "mp4",
-            server="R-019 HdHub4u",
-        ))
-    return streams
 
 
 class R019Provider(Provider):
@@ -102,18 +81,17 @@ class R019Provider(Provider):
             if data.imdb_id:
                 narrowed: list[str] = []
                 for post_url in posts:
-                    html = await _cf_get(post_url)
+                    html = await cf_get(post_url)
                     if html and f"imdb.com/title/{data.imdb_id}" in html:
                         narrowed.append(post_url)
                 if narrowed:
                     posts = narrowed
 
             for post_url in posts[:3]:
-                html = await _cf_get(post_url)
+                html = await cf_get(post_url)
                 if not html:
                     continue
-                from bs4 import BeautifulSoup
-                soup = BeautifulSoup(html, "html.parser")
+                soup = parse(html)
 
                 if data.season is None:
                     for a in soup.select("h3 a, h4 a"):
@@ -122,8 +100,14 @@ class R019Provider(Provider):
                             if not link:
                                 continue
                             resolved = (await get_redirect_link(link)) if "id=" in link else link
-                            for s in await _load_extractor(resolved or link):
-                                result.streams.append(s)
+                            resolved_html = await cf_get(resolved or link)
+                            if resolved_html:
+                                for url in extract_media_urls(resolved_html):
+                                    result.streams.append(Stream(
+                                        url=url,
+                                        type="m3u8" if ".m3u8" in url else "mp4",
+                                        server="R-019 HdHub4u",
+                                    ))
                 else:
                     ep_re = re.compile(rf"episode\s*{data.episode}", re.I)
                     current_season_block = False
@@ -142,8 +126,14 @@ class R019Provider(Provider):
                                     link = a.get("href") or ""
                                     if link:
                                         resolved = (await get_redirect_link(link)) if "id=" in link else link
-                                        for s in await _load_extractor(resolved or link):
-                                            result.streams.append(s)
+                                        resolved_html = await cf_get(resolved or link)
+                                        if resolved_html:
+                                            for url in extract_media_urls(resolved_html):
+                                                result.streams.append(Stream(
+                                                    url=url,
+                                                    type="m3u8" if ".m3u8" in url else "mp4",
+                                                    server="R-019 HdHub4u",
+                                                ))
                             sib = sib.find_next_sibling()
         except Exception:
             pass

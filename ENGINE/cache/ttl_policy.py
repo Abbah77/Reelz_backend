@@ -60,8 +60,10 @@ Provider taxonomy built from reading all R_*.py files:
   R-024  UhdMovies     scraped mp4 via driveleech/driveseed        → medium
   R-025  Moviesmod     scraped mp4 via hrefli bypass              → medium
   R-101  Download TPL  template, no-op                            → medium
-  R-201  OpenSubtitles per-download signed URL                    → short (1-hour token)
-  R-202  Subtitle #2   (same family, signed)                      → short
+  R-201  Subscene      scraped .srt direct links                   → medium (hours)
+  R-202  Addic7ed      scraped .srt direct links                   → medium (hours)
+  R-203  TVsubtitles   scraped .srt direct links                   → medium (hours)
+  R-204  YIFY Subs     scraped .srt direct links                   → medium (hours)
   R-301  TMDB Trailers YouTube links (never expire)               → very long
   R-302  Archive.org   static archive mp4                         → very long
 """
@@ -96,8 +98,10 @@ _PROVIDER_TTL: dict[str, tuple[int, int]] = {
     "R-010": (600,   500),   # PrimeVids — iframe + m3u8 chain
     "R-013": (2400,  2000),  # HDRezka — CDN translator URLs, fairly stable
     "R-014": (3600,  3000),  # AniZone — direct media-player mp4, more stable
-    "R-201": (3000,  2400),  # OpenSubtitles — download link token ~1h, use 50min
-    "R-202": (3000,  2400),  # Subtitle provider 2
+    "R-201": (3600,  3000),  # Subscene — scraped .srt links, stable for hours
+    "R-202": (3600,  3000),  # Addic7ed — scraped .srt links, stable for hours
+    "R-203": (3600,  3000),  # TVsubtitles — scraped .srt links, stable for hours
+    "R-204": (3600,  3000),  # YIFY Subtitles — scraped .srt links, stable for hours
 
     # ── Medium (scraped MP4 / CF-protected pages — links stable hours to days)
     "R-008": (14400, 12000), # DahmerMovies — Apache directory, MP4, very stable
