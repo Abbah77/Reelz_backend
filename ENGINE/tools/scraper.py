@@ -63,3 +63,33 @@ async def fetch_soup(url: str, *, referer: str = "", extra_headers: Optional[dic
         return BeautifulSoup(r.text, "html.parser")
     except Exception:
         return None
+
+
+async def fetch_soup_cf(url: str, *, use_warp: bool = False):
+    """
+    GET a Cloudflare-protected URL via FlareSolverr and return a BeautifulSoup
+    object, or None on failure / FlareSolverr not configured.
+
+    Use this instead of fetch_soup() for any site that sits behind a
+    Cloudflare JS challenge (e.g. Subscene, YIFY).
+
+    Usage:
+        from ENGINE.tools.scraper import fetch_soup_cf
+        soup = await fetch_soup_cf("https://subscene.com/subtitles/search?query=Avatar")
+        if soup is None:
+            return result  # FlareSolverr not available or request failed
+
+    Args:
+        url:       Full URL to fetch.
+        use_warp:  Route through WARP-backed FlareSolverr (WARP_FLARESOLVERR_URL).
+                   Default False uses the standard FLARESOLVERR_URL.
+    """
+    from bs4 import BeautifulSoup
+    from ENGINE.tools.flaresolverr import solve_cloudflare
+    try:
+        html, _cookies, _ua = await solve_cloudflare(url, use_warp=use_warp)
+        if not html:
+            return None
+        return BeautifulSoup(html, "html.parser")
+    except Exception:
+        return None
