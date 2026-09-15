@@ -67,6 +67,7 @@ async def _collect_from_download_providers(data: LinkData) -> list[dict]:
                 "size_bytes":    item.size_bytes,
                 "headers":       item.headers,
                 "expires_at_ms": item.expires_at_ms,
+                # Download headers — None means the app should omit that header.
                 "referer":       item.referer,
                 "origin":        item.origin,
                 "user_agent":    item.user_agent,

@@ -45,6 +45,9 @@ class R005Provider(Provider):
                     type="m3u8" if ".m3u8" in link else "iframe",
                     server="R-005 AllMovieLand",
                     headers={"Referer": f"{_API}/"},
+                    referer=f"{_API}/",
+                    origin=None,
+                    user_agent=None,
                 ))
                 return result
 
@@ -58,6 +61,9 @@ class R005Provider(Provider):
                     server="R-005 AllMovieLand",
                     quality=src.get("label"),
                     headers={"Referer": f"{_API}/"},
+                    referer=f"{_API}/",
+                    origin=None,
+                    user_agent=None,
                 ))
         except Exception:
             pass

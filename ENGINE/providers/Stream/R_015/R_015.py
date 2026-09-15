@@ -173,6 +173,9 @@ class R015Provider(Provider):
                         type="m3u8",
                         server=f"R-015 AniNeko {'DUB' if e['dub'] else 'SUB'} · {host}",
                         headers={"Referer": f"{_BASE}/", "Origin": _BASE},
+                        referer=f"{_BASE}/",
+                        origin=_BASE,
+                        user_agent=None,
                     ))
 
             await asyncio.gather(*[resolve_one(e) for e in chosen])

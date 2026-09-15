@@ -46,6 +46,16 @@ class SubtitleRequestBody(BaseModel):
         return [lang.lower().strip() for lang in v if lang.strip()]
 
 
+def _merge_headers(base: dict, referer, origin, user_agent) -> dict:
+    if not referer and not origin and not user_agent:
+        return base or {}
+    merged = dict(base or {})
+    if referer:    merged["Referer"]    = referer
+    if origin:     merged["Origin"]     = origin
+    if user_agent: merged["User-Agent"] = user_agent
+    return merged
+
+
 @router.post("/subtitles")
 async def get_subtitles(
     req: SubtitleRequestBody,
@@ -69,14 +79,12 @@ async def get_subtitles(
 
     subs = [
         {
-            "url":        s.get("url", ""),
-            "language":   s.get("language", "en"),
-            "label":      s.get("label", ""),
-            "format":     s.get("format", "srt"),
-            "enabled":    s.get("language", "en") == req.languages[0] if req.languages else False,
-            "referer":    s.get("referer"),
-            "origin":     s.get("origin"),
-            "user_agent": s.get("user_agent"),
+            "url":      s.get("url", ""),
+            "language": s.get("language", "en"),
+            "label":    s.get("label", ""),
+            "format":   s.get("format", "srt"),
+            "enabled":  s.get("language", "en") == req.languages[0] if req.languages else False,
+            "headers":  _merge_headers(s.get("headers"), s.get("referer"), s.get("origin"), s.get("user_agent")),
         }
         for s in result.get("subtitles", []) if s.get("url")
     ]

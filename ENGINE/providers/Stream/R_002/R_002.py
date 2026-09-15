@@ -41,6 +41,9 @@ class R002Provider(Provider):
                         type="m3u8" if ".m3u8" in link else "mp4",
                         server="R-002 VidFast",
                         quality=src.get("label"),
+                        referer=None,
+                        origin=None,
+                        user_agent=None,
                     ))
         except Exception:
             pass

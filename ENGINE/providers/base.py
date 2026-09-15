@@ -9,6 +9,13 @@ Rules:
   - Providers NEVER call other providers
   - Providers call tools freely from ENGINE/tools/
   - If a provider breaks, only that provider is affected
+
+Headers contract (referer / origin / user_agent):
+  - A provider sets these on Stream / DownloadItem ONLY when the CDN/server
+    requires them for the playback or download URL.
+  - Pass None (the default) if the URL works without that header.
+  - The manager passes them through to the API as-is.
+  - The app applies them when building the HTTP request; it ignores None values.
 """
 from __future__ import annotations
 
@@ -31,10 +38,12 @@ class Stream:
     # Unix timestamp in milliseconds (e.g. int(time.time() * 1000) + 3_600_000).
     # When set, the cache TTL is computed from this rather than the provider default.
     expires_at_ms: Optional[int] = None
-    # Optional request headers required to play this URL.
-    # Pass null for headers that are not needed by this provider.
-    referer: Optional[str] = None
-    origin: Optional[str] = None
+
+    # ── Playback headers — set ONLY when the CDN/server requires them ─────────
+    # Pass None (default) if the URL works without that header.
+    # The app skips any header that is None.
+    referer:    Optional[str] = None
+    origin:     Optional[str] = None
     user_agent: Optional[str] = None
 
 
@@ -52,10 +61,11 @@ class DownloadItem:
     # For HLS: this should be the quality-specific index.m3u8 URL
     # The backend resolves master → quality index before returning.
     # For MP4: direct download URL.
-    # Optional request headers required to download this URL.
-    # Pass null for headers that are not needed by this provider.
-    referer: Optional[str] = None
-    origin: Optional[str] = None
+
+    # ── Download headers — set ONLY when the CDN/server requires them ─────────
+    # Pass None (default) if the URL works without that header.
+    referer:    Optional[str] = None
+    origin:     Optional[str] = None
     user_agent: Optional[str] = None
 
 
@@ -65,10 +75,10 @@ class Subtitle:
     language: str
     label: Optional[str] = None
     format: str = "srt"
-    # Optional request headers required to fetch this subtitle URL.
-    # Pass null for headers that are not needed by this provider.
-    referer: Optional[str] = None
-    origin: Optional[str] = None
+
+    # ── Subtitle fetch headers — set ONLY when required ───────────────────────
+    referer:    Optional[str] = None
+    origin:     Optional[str] = None
     user_agent: Optional[str] = None
 
 
@@ -77,10 +87,10 @@ class Short:
     url: str
     title: str
     thumbnail: Optional[str] = None
-    # Optional request headers required to play this URL.
-    # Pass null for headers that are not needed by this provider.
-    referer: Optional[str] = None
-    origin: Optional[str] = None
+
+    # ── Short playback headers — set ONLY when required ───────────────────────
+    referer:    Optional[str] = None
+    origin:     Optional[str] = None
     user_agent: Optional[str] = None
 
 

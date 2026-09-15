@@ -68,9 +68,10 @@ async def get_subtitles(req, *, fresh: bool = False) -> dict:
                 "label":      sub.label or p.name,
                 "url":        sub.url,
                 "format":     fmt,
-                "referer":    sub.referer,
-                "origin":     sub.origin,
-                "user_agent": sub.user_agent,
+                # Fetch headers — None means the app should omit that header.
+                "referer":    getattr(sub, "referer", None),
+                "origin":     getattr(sub, "origin", None),
+                "user_agent": getattr(sub, "user_agent", None),
             })
         outcome = "found" if local else "failed" if isinstance(result, TimedOut) else "empty"
         await record(p.id, outcome, ms)

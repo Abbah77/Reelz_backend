@@ -26,6 +26,21 @@ class StreamRequestBody(BaseModel):
     episode: int = Field(0, ge=0)
 
 
+def _merge_headers(base: dict, referer, origin, user_agent) -> dict:
+    """
+    Merge referer/origin/user_agent into the existing headers dict.
+    None values are skipped — only headers the provider actually declared are included.
+    The existing headers dict is never mutated.
+    """
+    if not referer and not origin and not user_agent:
+        return base or {}
+    merged = dict(base or {})
+    if referer:    merged["Referer"]    = referer
+    if origin:     merged["Origin"]     = origin
+    if user_agent: merged["User-Agent"] = user_agent
+    return merged
+
+
 @router.post("/stream")
 async def resolve_stream(
     req: StreamRequestBody,
@@ -64,11 +79,8 @@ async def resolve_stream(
             "name":      name,
             "url":       url,
             "type":      "hls" if s.get("type") in ("m3u8", "hls") else "mp4",
-            "headers":   s.get("headers") or {},
+            "headers":   _merge_headers(s.get("headers"), s.get("referer"), s.get("origin"), s.get("user_agent")),
             "subtitles": [],
-            "referer":   s.get("referer"),
-            "origin":    s.get("origin"),
-            "user_agent": s.get("user_agent"),
         })
 
     if not streams and best:
@@ -76,11 +88,8 @@ async def resolve_stream(
             "name":      best.get("language") or "English",
             "url":       best.get("url", ""),
             "type":      "hls" if best.get("type") in ("m3u8", "hls") else "mp4",
-            "headers":   best.get("headers") or {},
+            "headers":   _merge_headers(best.get("headers"), best.get("referer"), best.get("origin"), best.get("user_agent")),
             "subtitles": [],
-            "referer":   best.get("referer"),
-            "origin":    best.get("origin"),
-            "user_agent": best.get("user_agent"),
         }]
 
     if not streams:

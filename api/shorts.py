@@ -24,6 +24,15 @@ def _encode_cursor(page):
 def _make_id(url, idx):
     return hashlib.md5(f"{url}:{idx}".encode()).hexdigest()[:16]
 
+def _merge_headers(base: dict, referer, origin, user_agent) -> dict:
+    if not referer and not origin and not user_agent:
+        return base or {}
+    merged = dict(base or {})
+    if referer:    merged["Referer"]    = referer
+    if origin:     merged["Origin"]     = origin
+    if user_agent: merged["User-Agent"] = user_agent
+    return merged
+
 
 @router.get("/shorts")
 async def get_shorts(
@@ -39,20 +48,17 @@ async def get_shorts(
     raw = result.get("shorts", [])
     items = [
         {
-            "id":         _make_id(s.get("url", ""), i),
-            "title":      s.get("title", ""),
-            "source":     s.get("provider") or s.get("source") or "original",
-            "url":        s.get("url", ""),
-            "thumbnail":  s.get("thumbnail") or None,
-            "referer":    s.get("referer"),
-            "origin":     s.get("origin"),
-            "user_agent": s.get("user_agent"),
+            "id":        _make_id(s.get("url", ""), i),
+            "title":     s.get("title", ""),
+            "source":    s.get("provider") or s.get("source") or "original",
+            "url":       s.get("url", ""),
+            "thumbnail": s.get("thumbnail") or None,
+            "headers":   _merge_headers(s.get("headers"), s.get("referer"), s.get("origin"), s.get("user_agent")),
         }
         for i, s in enumerate(raw[:limit]) if s.get("url")
     ]
     has_more = len(items) >= limit
 
-    # Use real per-provider TTL (R-301 YouTube = 24h, R-302 Archive = 7d).
     cache_ttl_ms = result.get("cache_ttl_ms") or None
     cf_max_age_s = result.get("cf_max_age_s") or None
 

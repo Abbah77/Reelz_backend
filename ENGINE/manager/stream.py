@@ -149,6 +149,8 @@ async def _fan_out(data: LinkData, category: ContentCategory) -> tuple[Optional[
                 "headers":     s.headers,
                 "playable":    s.type != "iframe",
                 "expires_at_ms": s.expires_at_ms,
+                # Playback headers — None means the app should omit that header.
+                # Only set by providers that actually require them from the CDN.
                 "referer":     s.referer,
                 "origin":      s.origin,
                 "user_agent":  s.user_agent,

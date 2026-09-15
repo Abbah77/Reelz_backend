@@ -80,6 +80,9 @@ class R003Provider(Provider):
                                         server=f"R-003 VidRock-{key}",
                                         quality=str(item.get("resolution", "")) + "p" if item.get("resolution") else None,
                                         headers=headers,
+                                        referer=f"{_API}/",
+                                        origin=_API,
+                                        user_agent=None,
                                     ))
                     except Exception:
                         pass
@@ -90,6 +93,9 @@ class R003Provider(Provider):
                         server=f"R-003 VidRock-{key}",
                         quality=lang,
                         headers=headers,
+                        referer=f"{_API}/",
+                        origin=_API,
+                        user_agent=None,
                     ))
         except Exception:
             pass

@@ -61,9 +61,10 @@ async def get_shorts(*, tmdb_id: int, media_type: str, page: int = 1, fresh: boo
                 "title":       s.title,
                 "url":         s.url,
                 "thumbnail":   s.thumbnail,
-                "referer":     s.referer,
-                "origin":      s.origin,
-                "user_agent":  s.user_agent,
+                # Playback headers — None means not required by this provider.
+                "referer":     getattr(s, "referer", None),
+                "origin":      getattr(s, "origin", None),
+                "user_agent":  getattr(s, "user_agent", None),
             })
         outcome = "found" if local else "failed" if isinstance(result, TimedOut) else "empty"
         await record(p.id, outcome, ms)

@@ -56,6 +56,9 @@ class R010Provider(Provider):
                             type="m3u8",
                             server="R-010 PrimeVids",
                             headers={"Referer": iframe},
+                            referer=_REFERER,
+                            origin=None,
+                            user_agent=None,
                         ))
                         return result
             except Exception:
@@ -67,6 +70,9 @@ class R010Provider(Provider):
                 type="iframe",
                 server="R-010 PrimeVids",
                 headers={"Referer": f"{_API}/"},
+                referer=_REFERER,
+                origin=None,
+                user_agent=None,
             ))
         except Exception:
             pass

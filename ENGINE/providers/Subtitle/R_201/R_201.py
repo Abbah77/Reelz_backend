@@ -68,6 +68,9 @@ class R201Provider(Provider):
                     language="en",
                     label=release_name or "Subscene",
                     format="srt",
+                    referer=None,
+                    origin=None,
+                    user_agent=None,
                 ))
                 if len(result.subtitles) >= 10:
                     break

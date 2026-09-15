@@ -123,6 +123,9 @@ class R014Provider(Provider):
                 type="mp4" if src.endswith(".mp4") else "m3u8",
                 server="R-014 AniZone",
                 headers={"Referer": f"{_BASE}/"},
+                referer=f"{_BASE}/",
+                origin=None,
+                user_agent=None,
             ))
         except Exception:
             pass

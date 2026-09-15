@@ -45,6 +45,9 @@ class R007Provider(Provider):
                     type="m3u8" if ".m3u8" in stream_url else "mp4",
                     server=f"R-007 VaplayerV2 Server {idx + 1}",
                     headers={"Referer": _REFERER},
+                    referer=_REFERER,
+                    origin=None,
+                    user_agent=None,
                 ))
         except Exception:
             pass

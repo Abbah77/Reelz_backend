@@ -159,6 +159,9 @@ class R016Provider(Provider):
                                 url=m3u8, type="m3u8",
                                 server=f"R-016 AnimeNoSub {'DUB' if v['dub'] else 'SUB'}",
                                 headers={"Referer": "https://megaplay.buzz/", "Origin": "https://megaplay.buzz"},
+                                referer=f"{origin}/",
+                                origin=None,
+                                user_agent=None,
                             ))
 
                     await asyncio.gather(*[resolve_variant(v) for v in variants])

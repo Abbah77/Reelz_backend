@@ -123,6 +123,9 @@ class R009Provider(Provider):
                                         "Referer": hmap.get("Referer", ""),
                                         "Origin": hmap.get("Origin", ""),
                                     },
+                                    referer=hmap.get("Referer"),
+                                    origin=None,
+                                    user_agent=None,
                                 ))
                             except Exception:
                                 pass
@@ -133,6 +136,9 @@ class R009Provider(Provider):
                                 type=stream_type,
                                 server=f"R-009 {label} (VLC)",
                                 quality="1080p",
+                                referer=hmap.get("Referer"),
+                                origin=None,
+                                user_agent=None,
                             ))
                 except Exception:
                     pass

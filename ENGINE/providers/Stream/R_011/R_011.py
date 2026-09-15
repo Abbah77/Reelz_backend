@@ -140,6 +140,9 @@ class R011Provider(Provider):
                         server="R-011 KissKh",
                         quality="720p",
                         headers={"Origin": _API, "Referer": _API},
+                        referer=f"{_API}/",
+                        origin=None,
+                        user_agent=None,
                     ))
 
             # 6) Subtitles

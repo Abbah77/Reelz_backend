@@ -32,6 +32,21 @@ def _res_height(q: str) -> int:
     return int(m.group(1)) if m else 0
 
 
+def _merge_headers(base: dict, referer, origin, user_agent) -> dict:
+    """
+    Merge referer/origin/user_agent into the existing headers dict.
+    None values are skipped. Each download link carries its own headers
+    since links may come from different providers.
+    """
+    if not referer and not origin and not user_agent:
+        return base or {}
+    merged = dict(base or {})
+    if referer:    merged["Referer"]    = referer
+    if origin:     merged["Origin"]     = origin
+    if user_agent: merged["User-Agent"] = user_agent
+    return merged
+
+
 @router.post("/download")
 async def get_download_links(
     req: StreamRequestBody,
@@ -63,7 +78,6 @@ async def get_download_links(
         if not url:
             continue
         if not label:
-            # Infer from URL; fall back to "1080p" — never synthesise "Auto"
             import re as _re
             m = _re.search(r"(2160|1080|720|480|360|240)p?", url, _re.I)
             label = (m.group(1) + "p") if m else "1080p"
@@ -75,9 +89,9 @@ async def get_download_links(
             "language":   link.get("language") or "English",
             "size_bytes": int(link.get("size_bytes") or 0),
             "premium":    res >= 1080 and not is_premium,
-            "referer":    link.get("referer"),
-            "origin":     link.get("origin"),
-            "user_agent": link.get("user_agent"),
+            # Each link carries its own headers — different links may come from
+            # different providers with different CDN requirements.
+            "headers":    _merge_headers(link.get("headers"), link.get("referer"), link.get("origin"), link.get("user_agent")),
         })
 
     if not links:
