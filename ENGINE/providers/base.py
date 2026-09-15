@@ -31,6 +31,11 @@ class Stream:
     # Unix timestamp in milliseconds (e.g. int(time.time() * 1000) + 3_600_000).
     # When set, the cache TTL is computed from this rather than the provider default.
     expires_at_ms: Optional[int] = None
+    # Optional request headers required to play this URL.
+    # Pass null for headers that are not needed by this provider.
+    referer: Optional[str] = None
+    origin: Optional[str] = None
+    user_agent: Optional[str] = None
 
 
 @dataclass
@@ -47,6 +52,11 @@ class DownloadItem:
     # For HLS: this should be the quality-specific index.m3u8 URL
     # The backend resolves master → quality index before returning.
     # For MP4: direct download URL.
+    # Optional request headers required to download this URL.
+    # Pass null for headers that are not needed by this provider.
+    referer: Optional[str] = None
+    origin: Optional[str] = None
+    user_agent: Optional[str] = None
 
 
 @dataclass
@@ -55,6 +65,11 @@ class Subtitle:
     language: str
     label: Optional[str] = None
     format: str = "srt"
+    # Optional request headers required to fetch this subtitle URL.
+    # Pass null for headers that are not needed by this provider.
+    referer: Optional[str] = None
+    origin: Optional[str] = None
+    user_agent: Optional[str] = None
 
 
 @dataclass
@@ -62,6 +77,11 @@ class Short:
     url: str
     title: str
     thumbnail: Optional[str] = None
+    # Optional request headers required to play this URL.
+    # Pass null for headers that are not needed by this provider.
+    referer: Optional[str] = None
+    origin: Optional[str] = None
+    user_agent: Optional[str] = None
 
 
 @dataclass

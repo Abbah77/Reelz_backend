@@ -66,6 +66,9 @@ async def resolve_stream(
             "type":      "hls" if s.get("type") in ("m3u8", "hls") else "mp4",
             "headers":   s.get("headers") or {},
             "subtitles": [],
+            "referer":   s.get("referer"),
+            "origin":    s.get("origin"),
+            "user_agent": s.get("user_agent"),
         })
 
     if not streams and best:
@@ -75,6 +78,9 @@ async def resolve_stream(
             "type":      "hls" if best.get("type") in ("m3u8", "hls") else "mp4",
             "headers":   best.get("headers") or {},
             "subtitles": [],
+            "referer":   best.get("referer"),
+            "origin":    best.get("origin"),
+            "user_agent": best.get("user_agent"),
         }]
 
     if not streams:

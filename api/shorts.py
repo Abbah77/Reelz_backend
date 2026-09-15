@@ -38,9 +38,16 @@ async def get_shorts(
     result = await engine_shorts(tmdb_id=0, media_type="movie", page=page, fresh=bool(fresh))
     raw = result.get("shorts", [])
     items = [
-        {"id": _make_id(s.get("url",""), i), "title": s.get("title",""),
-         "source": s.get("provider") or s.get("source") or "original",
-         "url": s.get("url",""), "thumbnail": s.get("thumbnail") or None}
+        {
+            "id":         _make_id(s.get("url", ""), i),
+            "title":      s.get("title", ""),
+            "source":     s.get("provider") or s.get("source") or "original",
+            "url":        s.get("url", ""),
+            "thumbnail":  s.get("thumbnail") or None,
+            "referer":    s.get("referer"),
+            "origin":     s.get("origin"),
+            "user_agent": s.get("user_agent"),
+        }
         for i, s in enumerate(raw[:limit]) if s.get("url")
     ]
     has_more = len(items) >= limit

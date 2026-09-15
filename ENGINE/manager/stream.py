@@ -149,6 +149,9 @@ async def _fan_out(data: LinkData, category: ContentCategory) -> tuple[Optional[
                 "headers":     s.headers,
                 "playable":    s.type != "iframe",
                 "expires_at_ms": s.expires_at_ms,
+                "referer":     s.referer,
+                "origin":      s.origin,
+                "user_agent":  s.user_agent,
                 "_ttl_seconds": ttl_app,
                 "_has_subtitles": bool(result.subtitles),
             }

@@ -69,11 +69,14 @@ async def get_subtitles(
 
     subs = [
         {
-            "url":      s.get("url", ""),
-            "language": s.get("language", "en"),
-            "label":    s.get("label", ""),
-            "format":   s.get("format", "srt"),
-            "enabled":  s.get("language", "en") == req.languages[0] if req.languages else False,
+            "url":        s.get("url", ""),
+            "language":   s.get("language", "en"),
+            "label":      s.get("label", ""),
+            "format":     s.get("format", "srt"),
+            "enabled":    s.get("language", "en") == req.languages[0] if req.languages else False,
+            "referer":    s.get("referer"),
+            "origin":     s.get("origin"),
+            "user_agent": s.get("user_agent"),
         }
         for s in result.get("subtitles", []) if s.get("url")
     ]

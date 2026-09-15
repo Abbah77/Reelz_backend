@@ -75,6 +75,9 @@ async def get_download_links(
             "language":   link.get("language") or "English",
             "size_bytes": int(link.get("size_bytes") or 0),
             "premium":    res >= 1080 and not is_premium,
+            "referer":    link.get("referer"),
+            "origin":     link.get("origin"),
+            "user_agent": link.get("user_agent"),
         })
 
     if not links:

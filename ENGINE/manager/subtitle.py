@@ -63,11 +63,14 @@ async def get_subtitles(req, *, fresh: bool = False) -> dict:
                 else:
                     fmt = "srt"
             local.append({
-                "provider": p.name,
-                "language": sub.language,
-                "label":    sub.label or p.name,
-                "url":      sub.url,
-                "format":   fmt,
+                "provider":   p.name,
+                "language":   sub.language,
+                "label":      sub.label or p.name,
+                "url":        sub.url,
+                "format":     fmt,
+                "referer":    sub.referer,
+                "origin":     sub.origin,
+                "user_agent": sub.user_agent,
             })
         outcome = "found" if local else "failed" if isinstance(result, TimedOut) else "empty"
         await record(p.id, outcome, ms)

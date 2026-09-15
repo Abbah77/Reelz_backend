@@ -67,6 +67,9 @@ async def _collect_from_download_providers(data: LinkData) -> list[dict]:
                 "size_bytes":    item.size_bytes,
                 "headers":       item.headers,
                 "expires_at_ms": item.expires_at_ms,
+                "referer":       item.referer,
+                "origin":        item.origin,
+                "user_agent":    item.user_agent,
             })
         outcome = "found" if local else "failed" if isinstance(result, TimedOut) else "empty"
         await record(p.id, outcome, ms)
@@ -112,6 +115,9 @@ async def _collect_from_stream_providers(data: LinkData) -> list[dict]:
                     "size_bytes":    0,
                     "headers":       s.headers,
                     "expires_at_ms": s.expires_at_ms,
+                    "referer":       s.referer,
+                    "origin":        s.origin,
+                    "user_agent":    s.user_agent,
                 })
             elif s.type in ("m3u8", "hls"):
                 variants = await resolve_master(s.url, headers=s.headers)
@@ -126,6 +132,9 @@ async def _collect_from_stream_providers(data: LinkData) -> list[dict]:
                         "size_bytes":    0,
                         "headers":       s.headers,
                         "expires_at_ms": s.expires_at_ms,
+                        "referer":       s.referer,
+                        "origin":        s.origin,
+                        "user_agent":    s.user_agent,
                     })
         outcome = "found" if local else "failed" if isinstance(result, TimedOut) else "empty"
         await record(p.id, outcome, ms)
