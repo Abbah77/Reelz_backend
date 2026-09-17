@@ -4,8 +4,9 @@ USERS/models.py — Database models.
 Tables:
   users        — one row per Google account
   sessions     — JWT refresh token tracking (optional; soft-logout possible)
-  history      — watch progress per media/episode
   payments     — Paystack transaction log
+
+Note: watch history is 100% local (Room DB) — no server-side history table.
 """
 from __future__ import annotations
 
@@ -13,7 +14,7 @@ import time
 from typing import Optional
 
 from sqlalchemy import (
-    Boolean, Float, Index, Integer, String, Text, BigInteger,
+    Boolean, Float, Integer, String, Text, BigInteger,
     ForeignKey, UniqueConstraint,
 )
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -40,7 +41,6 @@ class User(Base):
                                             onupdate=lambda: int(time.time() * 1000))
 
     # Relationships
-    history:   Mapped[list["WatchHistory"]]  = relationship(back_populates="user", cascade="all, delete-orphan")
     payments:  Mapped[list["Payment"]]        = relationship(back_populates="user", cascade="all, delete-orphan")
 
     def is_premium_active(self) -> bool:
@@ -53,25 +53,6 @@ class User(Base):
         if self.premium_expires_at and self.premium_expires_at < int(time.time() * 1000):
             return "expired"
         return self.plan or "active"
-
-
-class WatchHistory(Base):
-    __tablename__ = "history"
-    __table_args__ = (
-        UniqueConstraint("user_id", "media_id", "season", "episode"),
-        Index("ix_history_user_updated", "user_id", "watched_at"),
-    )
-
-    id:          Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    user_id:     Mapped[str] = mapped_column(String(64), ForeignKey("users.id", ondelete="CASCADE"), index=True)
-    media_id:    Mapped[str] = mapped_column(String(64))
-    season:      Mapped[int] = mapped_column(Integer, default=0)
-    episode:     Mapped[int] = mapped_column(Integer, default=0)
-    position_ms: Mapped[int] = mapped_column(BigInteger, default=0)
-    duration_ms: Mapped[int] = mapped_column(BigInteger, default=0)
-    watched_at:  Mapped[int] = mapped_column(BigInteger, default=lambda: int(time.time() * 1000))
-
-    user: Mapped["User"] = relationship(back_populates="history")
 
 
 class Payment(Base):

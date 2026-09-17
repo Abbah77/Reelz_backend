@@ -47,6 +47,44 @@ def _merge_headers(base: dict, referer, origin, user_agent) -> dict:
     return merged
 
 
+async def _fetch_subtitles(engine_req, default_lang: str = "en") -> list[dict]:
+    """
+    Best-effort subtitle fetch bundled into /download responses.
+    Same shaping as api/subtitle.py. Never raises — a subtitle provider
+    failure must not break download link resolution.
+    """
+    try:
+        sub_req = EngineRequest(
+            tmdb_id = engine_req.tmdb_id,
+            type    = engine_req.type,
+            season  = engine_req.season,
+            episode = engine_req.episode,
+        )
+        sub_req.languages   = [default_lang]  # type: ignore[attr-defined]
+        sub_req.duration_ms = 0               # type: ignore[attr-defined]
+
+        from ENGINE.manager.subtitle import get_subtitles as engine_subtitles
+        result = await engine_subtitles(sub_req, fresh=False)
+
+        subs = []
+        for s in result.get("subtitles", []):
+            url = s.get("url", "")
+            if not url:
+                continue
+            lang = s.get("language", "en")
+            subs.append({
+                "url":      url,
+                "language": lang,
+                "label":    s.get("label", ""),
+                "format":   s.get("format", "srt"),
+                "enabled":  lang == default_lang,
+                "headers":  _merge_headers(s.get("headers"), s.get("referer"), s.get("origin"), s.get("user_agent")),
+            })
+        return subs
+    except Exception:
+        return []
+
+
 @router.post("/download")
 async def get_download_links(
     req: StreamRequestBody,
@@ -71,6 +109,10 @@ async def get_download_links(
     from ENGINE.manager.download import get_downloads
     result = await get_downloads(engine_req, fresh=bool(fresh))
 
+    now_ms = int(time.time() * 1000)
+    cache_ttl_ms_preview = result.get("cache_ttl_ms") or None
+    default_link_expiry = now_ms + (cache_ttl_ms_preview or 3_600_000)
+
     links = []
     for link in result.get("links", []):
         url   = link.get("url", "")
@@ -83,15 +125,20 @@ async def get_download_links(
             label = (m.group(1) + "p") if m else "1080p"
         res = _res_height(label)
         links.append({
-            "label":      label,
-            "type":       link.get("type") or "mp4",
-            "url":        url,
-            "language":   link.get("language") or "English",
-            "size_bytes": int(link.get("size_bytes") or 0),
-            "premium":    res >= 1080 and not is_premium,
+            "label":        label,
+            "type":         link.get("type") or "mp4",
+            "url":          url,
+            "language":     link.get("language") or "English",
+            "size_bytes":   int(link.get("size_bytes") or 0),
+            "premium":      res >= 1080 and not is_premium,
             # Each link carries its own headers — different links may come from
             # different providers with different CDN requirements.
-            "headers":    _merge_headers(link.get("headers"), link.get("referer"), link.get("origin"), link.get("user_agent")),
+            "headers":      _merge_headers(link.get("headers"), link.get("referer"), link.get("origin"), link.get("user_agent")),
+            # Per-link expiry — falls back to the provider's own expiry if given,
+            # else the computed default below. The app's download engine reads
+            # this (not just the top-level expires_at_ms) to detect stale URLs
+            # on resume, so it must be set on every link, not just at the root.
+            "expires_at_ms": int(link.get("expires_at_ms") or default_link_expiry),
         })
 
     if not links:
@@ -101,17 +148,20 @@ async def get_download_links(
     cache_ttl_ms = result.get("cache_ttl_ms") or None
     cf_max_age_s = result.get("cf_max_age_s") or None
 
-    now_ms = int(time.time() * 1000)
-    link_expiries = [lnk.get("expires_at_ms") for lnk in result.get("links", []) if lnk.get("expires_at_ms")]
-    if link_expiries:
-        expires_at_ms = min(link_expiries)
-    elif cache_ttl_ms:
-        expires_at_ms = now_ms + cache_ttl_ms
-    else:
-        expires_at_ms = now_ms + 3_600_000
+    # Top-level expires_at_ms mirrors the earliest per-link expiry, so the
+    # two values (root metadata vs. per-link content) can never disagree.
+    expires_at_ms = min(lnk["expires_at_ms"] for lnk in links)
+
+    # Bundle subtitles alongside the download links (optional field —
+    # app treats it as nullable). Best-effort: link resolution still
+    # succeeds even if subtitle providers fail or return nothing.
+    subs = await _fetch_subtitles(engine_req)
 
     set_cache(response, cache_ttl_ms, cf_max_age_s=cf_max_age_s)
-    return ok({
+    payload = {
         "links":         links,
         "expires_at_ms": expires_at_ms,
-    }, cache_ttl_ms=cache_ttl_ms)
+    }
+    if subs:
+        payload["subtitles"] = subs
+    return ok(payload, cache_ttl_ms=cache_ttl_ms)

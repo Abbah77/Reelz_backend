@@ -41,6 +41,46 @@ def _merge_headers(base: dict, referer, origin, user_agent) -> dict:
     return merged
 
 
+async def _fetch_subtitles(engine_req, default_lang: str = "en") -> list[dict]:
+    """
+    Best-effort subtitle fetch for bundling into /stream responses.
+    Mirrors api/subtitle.py's shaping so the app gets the same schema
+    (url, language, label, format, enabled, headers) it expects inline
+    on each stream track. Never raises — a subtitle provider failure
+    must not break stream resolution.
+    """
+    try:
+        sub_req = EngineRequest(
+            tmdb_id = engine_req.tmdb_id,
+            type    = engine_req.type,
+            season  = engine_req.season,
+            episode = engine_req.episode,
+        )
+        sub_req.languages   = [default_lang]  # type: ignore[attr-defined]
+        sub_req.duration_ms = 0               # type: ignore[attr-defined]
+
+        from ENGINE.manager.subtitle import get_subtitles as engine_subtitles
+        result = await engine_subtitles(sub_req, fresh=False)
+
+        subs = []
+        for s in result.get("subtitles", []):
+            url = s.get("url", "")
+            if not url:
+                continue
+            lang = s.get("language", "en")
+            subs.append({
+                "url":      url,
+                "language": lang,
+                "label":    s.get("label", ""),
+                "format":   s.get("format", "srt"),
+                "enabled":  lang == default_lang,
+                "headers":  _merge_headers(s.get("headers"), s.get("referer"), s.get("origin"), s.get("user_agent")),
+            })
+        return subs
+    except Exception:
+        return []
+
+
 @router.post("/stream")
 async def resolve_stream(
     req: StreamRequestBody,
@@ -95,6 +135,14 @@ async def resolve_stream(
     if not streams:
         set_cache(response, None)
         return err("No streams available for this title")
+
+    # Bundle subtitles into every stream track so the player has them
+    # without a second round-trip to /subtitles. Best-effort: if the
+    # subtitle providers fail or return nothing, streams still play fine.
+    subs = await _fetch_subtitles(engine_req)
+    if subs:
+        for s in streams:
+            s["subtitles"] = subs
 
     cache_ttl_ms = result.get("cache_ttl_ms") or None
     cf_max_age_s = result.get("cf_max_age_s") or None

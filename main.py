@@ -10,8 +10,10 @@ import time
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from config import get_settings
 
@@ -57,7 +59,47 @@ app.add_middleware(
 )
 
 
-# ── Global exception handler — never leak stack traces to clients ─────────────
+# ── Exception handlers — every error response, of every kind, uses the same
+#    envelope as success responses. Three layers, most specific first:
+#
+#    1. HTTPException  — routes/dependencies that `raise HTTPException(...)`
+#                         (auth failures, bad ids, disabled features, etc.)
+#                         fastapi.HTTPException subclasses this, so one
+#                         handler here covers both import paths.
+#    2. RequestValidationError — pydantic request body/query validation
+#                         failures (missing/invalid fields), normally a
+#                         raw 422 `{"detail": [...]}` from FastAPI.
+#    3. Exception       — catch-all for anything unhandled; never leak
+#                         stack traces or internal error text to clients.
+# ────────────────────────────────────────────────────────────────────────────
+
+@app.exception_handler(StarletteHTTPException)
+async def _http_exception_handler(request: Request, exc: StarletteHTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "ok":           False,
+            "data":         None,
+            "error":        exc.detail,
+            "cache_ttl_ms": None,
+        },
+        headers=getattr(exc, "headers", None),
+    )
+
+
+@app.exception_handler(RequestValidationError)
+async def _validation_exception_handler(request: Request, exc: RequestValidationError):
+    return JSONResponse(
+        status_code=422,
+        content={
+            "ok":           False,
+            "data":         None,
+            "error":        "Invalid request",
+            "cache_ttl_ms": None,
+        },
+    )
+
+
 @app.exception_handler(Exception)
 async def _unhandled(request: Request, exc: Exception):
     return JSONResponse(

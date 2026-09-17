@@ -3,7 +3,7 @@ api/auth.py — Request authentication for catalog and ENGINE endpoints.
 
 Per schema v3 access matrix:
   GUEST      — unauthenticated, identical access to signed-in free user
-  FREE_USER  — valid JWT, adds watch history logging
+  FREE_USER  — valid JWT, identifies the account (watch history is local-only)
   PREMIUM    — valid JWT + active premium
 
 Dependencies exposed:
