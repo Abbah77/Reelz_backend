@@ -384,7 +384,7 @@ def _detect_kind(media_type: str, countries: list, genre_ids: list, keywords: li
 async def get_content_kind(tmdb_id: int, media_type: str) -> dict:
     """
     Return content-kind metadata for ENGINE managers:
-        { kind, is_anime, is_asian, is_bollywood, org_title }
+        { kind, is_anime, is_asian, is_bollywood, org_title, title, year }
 
     Results are cached 24 h independently so they survive stream cache expiry.
     Falls back to neutral defaults when TMDB key is absent or the request fails.
@@ -392,6 +392,11 @@ async def get_content_kind(tmdb_id: int, media_type: str) -> dict:
     Rules:
       - ENGINE managers call this; providers NEVER do.
       - This is the ONLY place in the codebase that fetches TMDB for kind detection.
+
+    Note: `title` here is the display title used to build LinkData for ALL
+    ENGINE providers (stream, download, subtitle). Several providers —
+    all 4 subtitle scrapers among them — search by title only and silently
+    return nothing if it's empty. Never drop this field.
     """
     default = {
         "kind":         media_type,
@@ -399,6 +404,8 @@ async def get_content_kind(tmdb_id: int, media_type: str) -> dict:
         "is_asian":     False,
         "is_bollywood": False,
         "org_title":    None,
+        "title":        None,
+        "year":         None,
     }
 
     if not _s.tmdb_api_key:
@@ -406,7 +413,10 @@ async def get_content_kind(tmdb_id: int, media_type: str) -> dict:
 
     cache_key = f"tmdb:meta:{media_type}:{tmdb_id}"
     cached = await cache_get(cache_key)
-    if cached:
+    if cached and cached.get("title"):
+        # Guard against stale cache entries written before `title`/`year`
+        # were added to this payload — fall through to a fresh fetch
+        # instead of silently returning a title-less result for up to 24h.
         return cached
 
     mtype = "movie" if media_type == "movie" else "tv"
@@ -427,6 +437,9 @@ async def get_content_kind(tmdb_id: int, media_type: str) -> dict:
 
     kind      = _detect_kind(media_type, countries, genre_ids, keywords)
     org_title = data.get("original_title") or data.get("original_name")
+    title     = data.get("title") or data.get("name") or org_title
+    date      = data.get("release_date") if media_type == "movie" else data.get("first_air_date")
+    year      = int(str(date)[:4]) if date and str(date)[:4].isdigit() else None
 
     meta = {
         "kind":         kind,
@@ -434,6 +447,8 @@ async def get_content_kind(tmdb_id: int, media_type: str) -> dict:
         "is_asian":     kind == "asian",
         "is_bollywood": kind == "bollywood",
         "org_title":    org_title,
+        "title":        title,
+        "year":         year,
     }
     await cache_set(cache_key, meta, ttl=86_400)
     return meta

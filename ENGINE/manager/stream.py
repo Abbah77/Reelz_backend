@@ -266,9 +266,13 @@ async def get_streams(req, *, fresh: bool = False, warp_mode: str = "off") -> di
     data = LinkData(
         tmdb_id      = req.tmdb_id,
         type         = req.type,
-        title        = req.title,
+        # req.title is never populated by the API routes (EngineRequest defaults
+        # it to ""), so fall back to the TMDB-resolved title. Many providers
+        # (stream, download, and ALL subtitle scrapers) search by title and
+        # silently return nothing if this is blank.
+        title        = req.title or meta["title"] or "",
         imdb_id      = req.imdb_id,
-        year         = req.year,
+        year         = req.year or meta["year"],
         season       = req.season,
         episode      = req.episode,
         is_anime     = meta["is_anime"],

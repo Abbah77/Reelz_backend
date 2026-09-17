@@ -197,9 +197,12 @@ async def get_downloads(req, *, fresh: bool = False) -> dict:
     data = LinkData(
         tmdb_id      = req.tmdb_id,
         type         = req.type,
-        title        = getattr(req, "title", ""),
+        # getattr(req, "title", "") is always "" from the API routes — fall
+        # back to the TMDB-resolved title. See ENGINE/manager/stream.py for
+        # the full rationale (all subtitle scrapers depend on this).
+        title        = getattr(req, "title", "") or meta["title"] or "",
         imdb_id      = getattr(req, "imdb_id", None),
-        year         = getattr(req, "year", None),
+        year         = getattr(req, "year", None) or meta["year"],
         season       = req.season,
         episode      = req.episode,
         is_anime     = meta["is_anime"],

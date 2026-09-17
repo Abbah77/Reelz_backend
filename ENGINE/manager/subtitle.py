@@ -16,6 +16,7 @@ from ENGINE.cache.cache import get as cache_get, set as cache_set, subtitle_key
 from ENGINE.manager.health import record, should_run
 from ENGINE.providers.base import safe_run, TimedOut, LinkData
 from ENGINE.providers.Subtitle.registry import get_all
+from CATALOG.tmdb import get_content_kind
 from config import get_settings
 
 _s = get_settings()
@@ -33,8 +34,14 @@ async def get_subtitles(req, *, fresh: bool = False) -> dict:
             return {"ok": True, "subtitles": cached.get("subtitles", []),
                     "cached": True, "took_ms": int((time.monotonic() - t0) * 1000)}
 
+    # title was previously hardcoded to "" here. ALL 4 subtitle providers
+    # (R-201..R-204) search their site by title alone — an empty title means
+    # every provider silently returns zero results on every single request,
+    # regardless of provider health. Resolve it from TMDB, same as
+    # ENGINE/manager/stream.py and ENGINE/manager/download.py do.
+    meta = await get_content_kind(req.tmdb_id, req.type)
     data = LinkData(
-        tmdb_id=req.tmdb_id, type=req.type, title="",
+        tmdb_id=req.tmdb_id, type=req.type, title=getattr(req, "title", "") or meta["title"] or "",
         imdb_id=req.imdb_id, season=req.season, episode=req.episode,
     )
     # Attach duration_ms hint so providers can fingerprint the exact file
