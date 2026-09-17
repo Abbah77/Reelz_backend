@@ -22,6 +22,15 @@ from config import get_settings
 _s = get_settings()
 _SUB_TTL = 3600  # subtitles cached 1 hour
 
+# Subtitles are best-effort/optional — the player works fine without them.
+# The app's HTTP client has a 30s read timeout on this endpoint, so the
+# WHOLE fan-out (not just each provider) must return comfortably inside
+# that window, or the app throws SocketTimeoutException client-side and
+# shows "No connection" even though the server eventually replied 200.
+# A single slow/CF-protected provider (e.g. YIFY via FlareSolverr) can
+# otherwise use its full provider_timeout_ms (45s) and blow past that.
+_SUBTITLE_FANOUT_BUDGET_S = 20
+
 
 async def get_subtitles(req, *, fresh: bool = False) -> dict:
     t0 = time.monotonic()
@@ -84,7 +93,23 @@ async def get_subtitles(req, *, fresh: bool = False) -> dict:
         await record(p.id, outcome, ms)
         return local
 
-    results = await asyncio.gather(*[invoke(p) for p in providers], return_exceptions=True)
+    tasks = {asyncio.ensure_future(invoke(p)): p for p in providers}
+    if tasks:
+        # Collect whatever finishes inside the budget; don't wait for stragglers.
+        # Unlike wait_for(gather(...)), this keeps results from any task that
+        # completes before the deadline even if others are still running —
+        # and cancels only what's left outstanding once the budget is hit.
+        done, pending = await asyncio.wait(tasks.keys(), timeout=_SUBTITLE_FANOUT_BUDGET_S)
+        for t in pending:
+            t.cancel()
+            # A cutoff still counts against the provider's health score —
+            # otherwise a chronically-slow provider never trips its circuit
+            # breaker (its own record() call inside invoke() never runs
+            # once cancelled) and keeps getting tried, and cut off, forever.
+            await record(tasks[t].id, "failed", _SUBTITLE_FANOUT_BUDGET_S * 1000)
+        results = [t.result() for t in done if not t.cancelled() and t.exception() is None]
+    else:
+        results = []
     for r in results:
         if isinstance(r, list):
             subs.extend(r)
