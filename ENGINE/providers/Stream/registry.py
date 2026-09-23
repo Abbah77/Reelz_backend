@@ -47,35 +47,53 @@ from ENGINE.providers.Stream.R_022.R_022 import R022Provider   # RogMovies
 from ENGINE.providers.Stream.R_023.R_023 import R023Provider   # MultiMovies
 from ENGINE.providers.Stream.R_024.R_024 import R024Provider   # UhdMovies
 from ENGINE.providers.Stream.R_025.R_025 import R025Provider   # Moviesmod
+from ENGINE.providers.Stream.R_026.R_026 import R026Provider   # VidLink
+from ENGINE.providers.Stream.R_027.R_027 import R027Provider   # CineMacity
+from ENGINE.providers.Stream.R_028.R_028 import R028Provider   # VidEasy
+from ENGINE.providers.Stream.R_029.R_029 import R029Provider   # VidZee
+from ENGINE.providers.Stream.R_030.R_030 import R030Provider   # Peachify
+from ENGINE.providers.Stream.R_031.R_031 import R031Provider   # VidSrcXYZ
 
 # ── ACTIVE — priority order (fastest/most reliable first) ────────────────────
+#
+# Fast, no-scrape, direct-API providers come first so the early-exit
+# "first valid m3u8" path in the stream manager fires as quickly as possible.
+# Scraper-heavy providers (R-018..R-025) run in parallel but their results
+# arrive later and fill quality slots rather than winning the first-stream race.
 
 ACTIVE: list[Provider] = [
-    R001Provider(),
-    R002Provider(),
-    R003Provider(),
-    R004Provider(),
-    R005Provider(),
-    R006Provider(),
-    R007Provider(),
-    R008Provider(),
-    R009Provider(),
-    R010Provider(),
-    R011Provider(),
-    R012Provider(),
-    R013Provider(),
-    R014Provider(),
-    R015Provider(),
-    R016Provider(),
-    R017Provider(),
-    R018Provider(),
-    R019Provider(),
-    R020Provider(),
-    R021Provider(),
-    R022Provider(),
-    R023Provider(),
-    R024Provider(),
-    R025Provider(),
+    R002Provider(),   # VidFast       — direct JSON API, fast
+    R026Provider(),   # VidLink       — enc-dec direct API, fast
+    R003Provider(),   # VidRock       — AES-encoded direct API, fast
+    R009Provider(),   # RiveStream    — multi-source HLS, fast fan-out
+    R004Provider(),   # HexaSU        — enc-dec direct, fast
+    R028Provider(),   # VidEasy       — 14-server fan-out, concurrently fast
+    R030Provider(),   # Peachify      — 6-server GCM-decrypt, concurrently fast
+    R029Provider(),   # VidZee        — 8-server AES-CBC decrypt, concurrently fast
+    R001Provider(),   # 2Embed        — iframe (fast URL build, low quality)
+    R006Provider(),   # Xpass         — iframe embed
+    R007Provider(),   # VaplayerV2    — iframe / direct
+    R010Provider(),   # PrimeVids     — direct
+    R031Provider(),   # VidSrcXYZ     — 3-step decrypt chain (medium speed)
+    R005Provider(),   # AllMovieLand  — scraper
+    R008Provider(),   # DahmerMovies  — scraper
+    R011Provider(),   # KissKh        — scraper (Asian content)
+    R012Provider(),   # Castle        — AES API (Indian/multi-lang)
+    R013Provider(),   # HDRezka       — scraper (Russian)
+    R027Provider(),   # CineMacity    — Cloudflare + playerjs scraper
+    R018Provider(),   # VegaMovies    — scraper + host extractor
+    R019Provider(),   # HdHub4u       — scraper
+    R020Provider(),   # 4KHdHub       — scraper
+    R021Provider(),   # Movies4u      — scraper
+    R022Provider(),   # RogMovies     — scraper
+    R023Provider(),   # MultiMovies   — scraper + Cloudflare
+    R024Provider(),   # UhdMovies     — scraper + bypass
+    R025Provider(),   # Moviesmod     — scraper + bypass
+    # Anime-specific
+    R014Provider(),   # AniZone
+    R015Provider(),   # AniNeko
+    R016Provider(),   # AnimeNoSub
+    R017Provider(),   # AnimeWorld
 ]
 
 # ── DISABLED — comment out or move here to pause a provider ──────────────────

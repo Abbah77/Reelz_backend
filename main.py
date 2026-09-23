@@ -37,7 +37,10 @@ async def lifespan(app: FastAPI):
     await init_db()
 
     yield
-    # Teardown (if needed) goes here
+
+    # ── Teardown: close shared HTTP client pool ───────────────────────────────
+    from ENGINE.tools.http import close_client
+    await close_client()
 
 
 app = FastAPI(

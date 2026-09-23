@@ -136,7 +136,7 @@ class R009Provider(Provider):
                                 type=stream_type,
                                 server=f"R-009 {label} (VLC)",
                                 quality="1080p",
-                                referer=hmap.get("Referer"),
+                                referer=None,
                                 origin=None,
                                 user_agent=None,
                             ))
