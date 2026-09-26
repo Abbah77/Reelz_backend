@@ -143,6 +143,9 @@ from api.user_auth import router as user_auth_router
 # Payments
 from api.payment import router as payment_router
 
+# Admin — full remote control (X-Admin-Token protected)
+from api.admin import router as admin_router
+
 app.include_router(health_router)
 app.include_router(config_router)
 app.include_router(feed_router)
@@ -156,6 +159,7 @@ app.include_router(shorts_router)
 app.include_router(insights_router)
 app.include_router(user_auth_router)
 app.include_router(payment_router)
+app.include_router(admin_router)
 
 
 @app.get("/", include_in_schema=False)

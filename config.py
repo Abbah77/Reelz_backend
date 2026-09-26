@@ -24,6 +24,7 @@ class Settings(BaseSettings):
 
     # ── Auth ──────────────────────────────────────────────────────────────────
     app_secret_token: str = ""          # X-Reelz-Token header value
+    admin_secret_key: str = ""          # X-Admin-Token header value (admin panel)
 
     # ── CORS ──────────────────────────────────────────────────────────────────
     cors_origins: str = "*"

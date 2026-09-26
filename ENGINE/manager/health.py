@@ -645,3 +645,24 @@ async def get_insights(pid: str, name: str, category: Optional[ContentCategory] 
 
 async def score_for_ranking(pid: str, category: Optional[ContentCategory] = None) -> float:
     return await _tracker.score_for_ranking(pid, category)
+
+
+async def is_circuit_open(pid: str) -> bool:
+    """Return True if the circuit breaker is currently tripped for this provider."""
+    s = _tracker._stats.get(pid)
+    if not s:
+        return False
+    return s.circuit_until > time.monotonic()
+
+
+# Expose raw stats dict for admin analytics (read-only — admin never writes here)
+# Each value is a dict with an "events" list of _Event dicts.
+def _get_raw_stats() -> dict:
+    result = {}
+    for pid, stat in _tracker._stats.items():
+        evs = [asdict(e) for e in _tracker._events.get(pid, deque())]
+        result[pid] = {"events": evs, **asdict(stat)}
+    return result
+
+# Alias used by admin.py for direct iteration
+_stats: dict = {}  # populated lazily — admin reads via _get_raw_stats()

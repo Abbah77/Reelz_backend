@@ -46,11 +46,12 @@ async def get_config(response: Response):
                 "rewarded_id":      _s.ads_rewarded_id,
                 "native_id":        _s.ads_native_id,
                 "placements": {
-                    "banner_enabled":       True,
-                    "interstitial_enabled": True,
-                    "native_enabled":       True,
-                    "preroll_enabled":      False,
-                },
+    "banner_enabled":       True,
+    "interstitial_enabled": True,
+    "native_enabled":       True,
+    "rewarded_enabled":     True, 
+    "preroll_enabled":      False,
+},
                 "frequency": {
                     "content_opens_before_first": 3,
                     "every_n_plays":              3,
